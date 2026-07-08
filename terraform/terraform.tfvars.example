@@ -1,0 +1,46 @@
+# =============================================================================
+# Example tfvars — copy to terraform.tfvars and fill in project_id.
+#   cp terraform.tfvars.example terraform.tfvars
+# Every other variable below already has a working default (see
+# variables.tf) so, for a brand-new/empty project, this one line is enough
+# for a one-shot `terraform apply`.
+# =============================================================================
+
+# REQUIRED — the only value you must set. No default on purpose (see
+# variables.tf) so a one-shot deploy never lands in the wrong project.
+project_id = "your-gcp-project-id"
+
+# --- Everything below is OPTIONAL — uncomment only to override a default ---
+
+# region              = "us-central1"        # provider-level default region
+# bq_location         = "US"                 # BigQuery multi-region for all datasets/connection/model
+# dashboard_dataset_id = "gemini_ent_dashboard"
+# analytics_dataset_id = "gemini_ent_analytics"
+# log_bucket_name      = "_Default"
+# log_bucket_location  = "global"
+# connection_id        = "gemini_conn"
+# model_name            = "gemini_flash"
+# gemini_endpoint       = "gemini-2.5-flash-lite"  # cheapest verified-working endpoint on this project family
+
+# --- Opt-in, cost-incurring flags (both default to false) ------------------
+
+# Runs sql/02_content_classification.sql once per `terraform apply` (Gemini
+# call per unclassified row). Leave false unless you deliberately want a
+# one-shot classification pass this apply.
+# enable_content_classification = false
+
+# Creates a recurring (see scheduled_query_schedule) BigQuery Data Transfer
+# Service scheduled query that re-runs sql/02_content_classification.sql
+# automatically, keeping t_content_topics fresh without manual re-runs.
+# WARNING: an equivalent scheduled query already exists in some projects,
+# created manually — read scheduled_query.tf before enabling this to avoid a
+# duplicate, double-billed schedule.
+# enable_scheduled_classification = false
+
+# Schedule for the above, in BigQuery Data Transfer Service syntax. Evaluated
+# in UTC (no timezone param) — "every day 18:00" = 18:00 UTC = 03:00 KST.
+# scheduled_query_schedule = "every day 18:00"
+
+# Service account email the scheduled query runs as. Empty = BQ Data
+# Transfer Service default behavior (no impersonation).
+# scheduled_query_service_account = ""

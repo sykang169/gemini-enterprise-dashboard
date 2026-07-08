@@ -1,0 +1,20 @@
+# Terraform
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+# 실제 변수 파일은 커밋 금지 (예시만 커밋)
+terraform/terraform.tfvars
+*.auto.tfvars
+
+# Python / notebook
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# 로컬/임시
+.DS_Store
+scratchpad/
+*.log

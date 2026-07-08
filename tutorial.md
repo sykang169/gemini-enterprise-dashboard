@@ -1,0 +1,74 @@
+# Gemini Enterprise 대시보드 배포
+
+<walkthrough-tutorial-duration duration="10"></walkthrough-tutorial-duration>
+
+이 가이드는 Gemini Enterprise + Model Armor 로그 대시보드를 **한 번의 명령으로** 배포합니다.
+
+## 프로젝트 선택
+
+먼저 배포할 GCP 프로젝트를 선택하세요. (프로젝트 소유자/편집자 권한 + 결제 활성화 필요)
+
+<walkthrough-project-setup></walkthrough-project-setup>
+
+```bash
+gcloud config set project <walkthrough-project-id/>
+```
+
+## 사전 확인
+
+Terraform이 Cloud Shell에 기본 설치되어 있습니다. 버전을 확인하세요.
+
+```bash
+terraform version
+```
+
+배포 스크립트에 실행 권한을 부여합니다.
+
+```bash
+chmod +x deploy.sh
+```
+
+## 배포 실행
+
+아래 명령이 전체 인프라를 구성합니다 — API 활성화, BigQuery 데이터셋/뷰, Log Analytics 링크, Gemini 연결·모델까지. **IAM 전파 대기 때문에 약 7분** 걸립니다.
+
+```bash
+./deploy.sh <walkthrough-project-id/>
+```
+
+<walkthrough-footnote>중간에 IAM 전파 대기(약 5분) 단계에서 멈춘 것처럼 보여도 정상입니다. 기다려 주세요.</walkthrough-footnote>
+
+## (선택) 콘텐츠 분류 활성화
+
+사용자 질문의 토픽/감성 분석까지 원하면, 아래처럼 옵션 플래그를 켜서 다시 적용하세요. (Gemini 호출 비용 발생)
+
+```bash
+terraform -chdir=terraform apply \
+  -var project_id=<walkthrough-project-id/> \
+  -var enable_content_classification=true \
+  -var enable_scheduled_classification=true
+```
+
+이렇게 하면 매일 03:00(KST) 자동으로 신규 질문을 분류합니다.
+
+## Looker Studio 대시보드 만들기
+
+배포 마지막에 출력된 **Looker Studio URL**을 복사해 브라우저에서 여세요. 22개 뷰가 이미 연결된 보고서가 열립니다.
+
+```bash
+cat looker_studio_create_url.txt
+```
+
+그 다음 <walkthrough-editor-open-file filePath="looker_studio_setup.md">looker_studio_setup.md</walkthrough-editor-open-file> 가이드를 따라 차트를 배치하세요. **섹션 A(보안·지연·품질·콘텐츠)를 첫 페이지로** 두는 것을 권장합니다.
+
+## 완료 🎉
+
+<walkthrough-conclusion-trophy></walkthrough-conclusion-trophy>
+
+대시보드 인프라 배포가 끝났습니다.
+
+- 데이터는 배포 시점 이후부터 누적됩니다 (forward-only)
+- 뷰는 Log Analytics 연합 조회라 **항상 최신**입니다
+- 정리하려면: `terraform -chdir=terraform destroy -var project_id=<walkthrough-project-id/>`
+
+자세한 내용은 <walkthrough-editor-open-file filePath="README.md">README.md</walkthrough-editor-open-file> 를 참고하세요.

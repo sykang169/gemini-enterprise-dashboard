@@ -68,13 +68,23 @@ terraform -chdir=terraform apply \
 
 ## Looker Studio 대시보드 만들기
 
-배포 마지막에 출력된 **Looker Studio URL**을 복사해 브라우저에서 여세요. 22개 뷰가 이미 연결된 보고서가 열립니다.
+Looker Studio는 차트가 배치된 리포트를 코드로 맨바닥에서 만드는 API가 없습니다. 따라서 **최초 1회는 손으로** 만들고, 이후엔 그 리포트를 템플릿 삼아 자동 복제합니다.
+
+<walkthrough-editor-open-file filePath="looker_studio_setup.md">looker_studio_setup.md</walkthrough-editor-open-file> **섹션 0**을 따라:
+1. [lookerstudio.google.com](https://lookerstudio.google.com) → 빈 보고서 → **데이터 추가 → BigQuery → 이 프로젝트 → `gemini_ent_dashboard`** → 뷰들 연결
+2. **섹션 A(보안·지연·품질·콘텐츠)를 첫 페이지로** 차트 배치
+
+### 다음 프로젝트부터 자동 생성
+위 리포트의 각 데이터 소스 별칭을 뷰 이름으로 맞추고 report id를 복사한 뒤:
 
 ```bash
-cat looker_studio_create_url.txt
+terraform -chdir=terraform apply \
+  -var project_id=<walkthrough-project-id/> \
+  -var looker_studio_template_report_id=<REPORT_ID>
+terraform -chdir=terraform output -raw looker_studio_url
 ```
 
-그 다음 <walkthrough-editor-open-file filePath="looker_studio_setup.md">looker_studio_setup.md</walkthrough-editor-open-file> 가이드를 따라 차트를 배치하세요. **섹션 A(보안·지연·품질·콘텐츠)를 첫 페이지로** 두는 것을 권장합니다.
+출력된 URL을 열면 차트까지 완성된 대시보드가 자동 생성됩니다.
 
 ## 완료 🎉
 

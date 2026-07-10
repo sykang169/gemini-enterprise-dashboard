@@ -49,8 +49,23 @@ locals {
     "v_model_armor_verdict_daily",
   ]
 
-  looker_studio_query_params = concat(
-    ["c.mode=edit", "c.reportName=${urlencode("Gemini Enterprise 운영-보안 대시보드")}"],
+  # Template-clone deep link. Looker Studio has no API to create charts, so a
+  # fully-built dashboard is produced by cloning a TEMPLATE report (built once,
+  # see var.looker_studio_template_report_id) and repointing each of its
+  # BigQuery data sources at THIS project's views. The ds.<alias> aliases must
+  # exactly match the data source aliases in the template — set each template
+  # data source's alias to its view name so this generation lines up.
+  #
+  # NOTE the params vs. a from-scratch create URL: c.reportId (the template) is
+  # what makes the charts appear, and the report name is r.reportName (NOT
+  # c.reportName — using c.reportName is one reason the old from-scratch URL
+  # misbehaved).
+  looker_studio_clone_params = concat(
+    [
+      "c.reportId=${var.looker_studio_template_report_id}",
+      "c.mode=edit",
+      "r.reportName=${urlencode("Gemini Enterprise 운영·보안 대시보드 - ${var.project_id}")}",
+    ],
     flatten([
       for v in local.view_names : [
         "ds.${v}.connector=bigQuery",
@@ -62,6 +77,20 @@ locals {
       ]
     ])
   )
+
+  looker_studio_manual_steps = <<-EOT
+    Looker Studio 리포트 수동 생성 (템플릿 미설정 상태):
+      1) https://lookerstudio.google.com → 빈 보고서 만들기
+      2) 데이터 추가 → BigQuery → ${var.project_id} → ${var.dashboard_dataset_id}
+      3) 아래 ${length(local.view_names)}개 뷰를 데이터 소스로 추가하고 차트 배치:
+         ${join(", ", local.view_names)}
+      4) 상세 차트 구성: looker_studio_setup.md (섹션 A를 첫 페이지로 권장)
+
+    ▶ 이후 완전 자동 생성을 원하면: 위에서 만든 리포트를 템플릿으로 등록하세요.
+      각 데이터 소스의 별칭(Alias)을 해당 뷰 이름으로 설정 → report id를 복사 →
+      -var="looker_studio_template_report_id=<REPORT_ID>" 로 다시 apply 하면
+      terraform output looker_studio_url 이 완성형 대시보드 복제 URL을 뽑아줍니다.
+  EOT
 }
 
 output "views_created" {
@@ -69,12 +98,15 @@ output "views_created" {
   value       = local.view_names
 }
 
-output "looker_studio_create_url" {
-  description = "Ready-to-open Looker Studio 'create report' deep link, with all 19 dashboard views pre-wired as BigQuery data sources. This is the URL deploy.sh prints after a successful apply."
-  value       = "https://lookerstudio.google.com/reporting/create?${join("&", local.looker_studio_query_params)}"
-}
-
-output "looker_studio_create_url_hint" {
-  description = "How to build a Looker Studio 'create report' deep link for these views by hand, if you ever need a different subset than looker_studio_create_url provides. Looker Studio reports themselves are not Terraform-managed."
-  value       = "https://lookerstudio.google.com/reporting/create?c.mode=edit&c.reportName=<name>&ds.<alias>.connector=bigQuery&ds.<alias>.type=TABLE&ds.<alias>.projectId=${var.project_id}&ds.<alias>.billingProjectId=${var.project_id}&ds.<alias>.datasetId=${var.dashboard_dataset_id}&ds.<alias>.tableId=<view_name>  (repeat the ds.<alias>.* group per view, one alias per data source)"
+output "looker_studio_url" {
+  description = <<-EOT
+    Auto-generated Looker Studio deep link that clones the template report
+    (var.looker_studio_template_report_id) into a fully-built dashboard for this
+    project, with every BigQuery data source repointed to this project's views.
+    If no template id is set, this returns manual setup instructions instead
+    (Looker Studio cannot create charts without a pre-existing template).
+  EOT
+  value = var.looker_studio_template_report_id == "" ? local.looker_studio_manual_steps : (
+    "https://lookerstudio.google.com/reporting/create?${join("&", local.looker_studio_clone_params)}"
+  )
 }

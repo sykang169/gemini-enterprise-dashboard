@@ -4,18 +4,24 @@
 #
 # Usage:
 #   ./deploy.sh <PROJECT_ID> [extra terraform apply args...]
+#   ./deploy.sh my-project -auto-approve          # unattended (recommended for retries)
 #
-# What it does:
-#   1. terraform -chdir=terraform init
-#   2. terraform -chdir=terraform apply -var="project_id=<PROJECT_ID>" ...
-#      (Terraform will still show its own plan + interactive yes/no prompt
-#      unless you pass -auto-approve yourself as an extra arg.)
-#   3. On success, prints the Looker Studio "create report" URL from the
-#      `looker_studio_create_url` output so you have a working dashboard link
-#      immediately.
+# It is safe to re-run against a project that already has some/all of the
+# dashboard resources — pre-existing datasets/connections/links are imported
+# into Terraform state instead of failing with "409 Already Exists".
 #
-# This script does not run automatically as part of authoring this repo —
-# it's meant for YOU to run when you're ready to actually deploy.
+# What it does, in order:
+#   0. Mint a static OAuth token so the google provider never touches the
+#      (flaky) Cloud Shell metadata server.
+#   1. Preflight: confirm auth + billing, then bootstrap the two APIs Terraform
+#      itself needs (serviceusage, cloudresourcemanager).
+#   2. terraform init.
+#   3. Import any pre-existing dataset / connection / Log Analytics link.
+#   4. terraform apply (with a small retry loop for eventual-consistency errors).
+#   5. Print the Looker Studio "create report" URL.
+#
+# Resource names default to the module's variable defaults; override via the
+# matching env vars below if you pass non-default -var values to Terraform.
 # =============================================================================
 set -euo pipefail
 
@@ -33,18 +39,135 @@ PROJECT_ID="$1"
 shift
 EXTRA_ARGS=("$@")
 
-echo ">>> Deploying Gemini Enterprise + Model Armor dashboard to project: ${PROJECT_ID}"
+# Resource identifiers — keep in sync with terraform/variables.tf defaults.
+# Override via env if you deploy with non-default -var values.
+BQ_LOCATION="${BQ_LOCATION:-US}"
+DASHBOARD_DATASET_ID="${DASHBOARD_DATASET_ID:-gemini_ent_dashboard}"
+ANALYTICS_DATASET_ID="${ANALYTICS_DATASET_ID:-gemini_ent_analytics}"
+CONNECTION_ID="${CONNECTION_ID:-gemini_conn}"
+LOG_BUCKET="${LOG_BUCKET:-_Default}"
+
+# ---------------------------------------------------------------------------
+# 0. Static access token — dodge Cloud Shell metadata-server token flakiness.
+#    In Cloud Shell / GCE the provider fetches an OAuth token from the metadata
+#    server on every call. Terraform fires many concurrently and the metadata
+#    server intermittently returns an empty body ->
+#      "oauth2/google: invalid token JSON from metadata: EOF"
+#    Handing the provider one static token up front sidesteps that entirely.
+# ---------------------------------------------------------------------------
+if ! command -v gcloud >/dev/null 2>&1; then
+  echo "ERROR: gcloud not found on PATH. Run this in Cloud Shell or install the gcloud CLI." >&2
+  exit 1
+fi
+
+if [[ -z "${GOOGLE_OAUTH_ACCESS_TOKEN:-}" ]]; then
+  if _tok="$(gcloud auth print-access-token 2>/dev/null)" && [[ -n "${_tok}" ]]; then
+    export GOOGLE_OAUTH_ACCESS_TOKEN="${_tok}"
+    echo ">>> Using a static access token to avoid metadata-server flakiness (valid ~1h)."
+  else
+    echo "ERROR: no active gcloud credentials — 'gcloud auth print-access-token' failed." >&2
+    echo "       Run 'gcloud auth login' (Cloud Shell may have dropped its session) and retry." >&2
+    exit 1
+  fi
+  unset _tok
+fi
+
+# ---------------------------------------------------------------------------
+# 1. Preflight — fail fast with actionable messages instead of deep in apply.
+# ---------------------------------------------------------------------------
+echo ">>> Preflight checks for project: ${PROJECT_ID}"
+
+# 1a. Billing must be enabled (BigQuery + Log Analytics both require it).
+billing_enabled="$(gcloud billing projects describe "${PROJECT_ID}" \
+  --format="value(billingEnabled)" 2>/dev/null || echo "")"
+if [[ "${billing_enabled}" != "True" ]]; then
+  echo "ERROR: billing is not enabled on ${PROJECT_ID} (or you lack permission to read it)." >&2
+  echo "       BigQuery and Log Analytics will fail with BILLING_DISABLED." >&2
+  echo "       Link a billing account, then re-run:" >&2
+  echo "         gcloud billing accounts list" >&2
+  echo "         gcloud billing projects link ${PROJECT_ID} --billing-account=XXXXXX-XXXXXX-XXXXXX" >&2
+  exit 1
+fi
+echo ">>> billing: enabled"
+
+# 1b. Bootstrap the two APIs Terraform itself needs to enable everything else.
+#     Without these, google_project_service fails with SERVICE_DISABLED on the
+#     serviceusage endpoint (chicken-and-egg). Idempotent; ~instant if already on.
+echo ">>> Ensuring serviceusage + cloudresourcemanager APIs are enabled..."
+gcloud services enable serviceusage.googleapis.com cloudresourcemanager.googleapis.com \
+  --project="${PROJECT_ID}"
+
+# ---------------------------------------------------------------------------
+# 2. terraform init
+# ---------------------------------------------------------------------------
 echo ">>> terraform -chdir=${TF_DIR} init"
 terraform -chdir="${TF_DIR}" init
 
-echo ">>> terraform -chdir=${TF_DIR} apply -var=\"project_id=${PROJECT_ID}\" ${EXTRA_ARGS[*]}"
-echo ">>> NOTE: this includes a 300s (5 min) wait for IAM propagation before the"
+# ---------------------------------------------------------------------------
+# 3. Import pre-existing resources so re-runs / partially-provisioned projects
+#    don't die on "409 Already Exists". Each import is best-effort: skipped if
+#    already in state, ignored if the resource doesn't exist yet in the project.
+# ---------------------------------------------------------------------------
+import_if_missing() {
+  local addr="$1" id="$2"
+  if terraform -chdir="${TF_DIR}" state list 2>/dev/null | grep -qx "${addr}"; then
+    return 0  # already tracked
+  fi
+  echo ">>> import (if it exists): ${addr}"
+  terraform -chdir="${TF_DIR}" import -var="project_id=${PROJECT_ID}" "${addr}" "${id}" \
+    >/dev/null 2>&1 || true
+}
+
+echo ">>> Importing any pre-existing dashboard resources..."
+import_if_missing "google_bigquery_dataset.gemini_ent_dashboard" \
+  "projects/${PROJECT_ID}/datasets/${DASHBOARD_DATASET_ID}"
+import_if_missing "google_bigquery_connection.gemini_conn" \
+  "projects/${PROJECT_ID}/locations/${BQ_LOCATION,,}/connections/${CONNECTION_ID}"
+import_if_missing "google_logging_linked_dataset.gemini_ent_analytics" \
+  "projects/${PROJECT_ID}/locations/global/buckets/${LOG_BUCKET}/links/${ANALYTICS_DATASET_ID}"
+
+# ---------------------------------------------------------------------------
+# 4. terraform apply, with a short retry loop.
+#    Some steps fail transiently on first try and succeed on retry:
+#      - the BQ connection's service account ("bqcx-...condel") is eventually
+#        consistent, so the roles/aiplatform.user binding can 400 with
+#        "Service account ... does not exist" until it propagates;
+#      - freshly-enabled APIs can briefly still report SERVICE_DISABLED.
+#    Pass -auto-approve for the retries to run unattended.
+# ---------------------------------------------------------------------------
+echo ">>> terraform apply -var=\"project_id=${PROJECT_ID}\" ${EXTRA_ARGS[*]}"
+echo ">>> NOTE: includes a 300s (5 min) wait for IAM propagation before the"
 echo ">>>       remote model is created — expect ~7 minutes total for a fresh project."
-terraform -chdir="${TF_DIR}" apply -var="project_id=${PROJECT_ID}" "${EXTRA_ARGS[@]}"
+
+attempt=1
+max_attempts=3
+until terraform -chdir="${TF_DIR}" apply -var="project_id=${PROJECT_ID}" "${EXTRA_ARGS[@]}"; do
+  if (( attempt >= max_attempts )); then
+    echo "ERROR: terraform apply still failing after ${max_attempts} attempts." >&2
+    exit 1
+  fi
+  echo ">>> apply failed (attempt ${attempt}/${max_attempts}) — likely a transient" >&2
+  echo ">>> propagation/eventual-consistency error. Waiting 30s and retrying..." >&2
+  sleep 30
+  attempt=$(( attempt + 1 ))
+done
+
+# ---------------------------------------------------------------------------
+# 5. Report the dashboard URL.
+#    The URL wires all ~19 views as data sources and is ~6 KB long. Printed to
+#    the terminal it wraps across many lines, and copying the wrapped text
+#    almost always truncates it — which makes Looker Studio complain
+#    "Missing value for ds.<view>.datasetId" for whichever view falls past the
+#    cut. So write it to a file as ONE unbroken line and copy it from there.
+# ---------------------------------------------------------------------------
+URL_FILE="${SCRIPT_DIR}/looker_studio_create_url.txt"
+terraform -chdir="${TF_DIR}" output -raw looker_studio_create_url > "${URL_FILE}"
 
 echo
-echo ">>> Deploy complete. Looker Studio dashboard create URL:"
-terraform -chdir="${TF_DIR}" output -raw looker_studio_create_url
-echo
-echo
-echo ">>> Open the URL above in a browser to create your Looker Studio report."
+echo ">>> Deploy complete."
+echo ">>> Looker Studio 'create report' URL written to:"
+echo ">>>   ${URL_FILE}   ($(wc -c < "${URL_FILE}") chars)"
+echo ">>>"
+echo ">>> Open it as a SINGLE line (do NOT copy the wrapped terminal text, it"
+echo ">>> will truncate). In Cloud Shell:"
+echo ">>>   cloudshell edit ${URL_FILE}    # then Ctrl+A, Ctrl+C, paste into the browser"

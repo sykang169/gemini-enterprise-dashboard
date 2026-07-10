@@ -28,9 +28,24 @@ terraform version
 chmod +x deploy.sh
 ```
 
+**결제(billing)가 활성화된 프로젝트여야 합니다.** BigQuery·Log Analytics는 결제 없이는 동작하지 않습니다. 확인하세요 — `billingEnabled: true`가 떠야 합니다.
+
+```bash
+gcloud billing projects describe <walkthrough-project-id/>
+```
+
+`false`이면 결제 계정을 연결하세요.
+
+```bash
+gcloud billing accounts list
+gcloud billing projects link <walkthrough-project-id/> --billing-account=<ACCOUNT_ID>
+```
+
 ## 배포 실행
 
 아래 명령이 전체 인프라를 구성합니다 — API 활성화, BigQuery 데이터셋/뷰, Log Analytics 링크, Gemini 연결·모델까지. **IAM 전파 대기 때문에 약 7분** 걸립니다.
+
+`deploy.sh`는 다음을 자동으로 처리합니다: 메타데이터 토큰 우회, `serviceusage`/`cloudresourcemanager` 부트스트랩, 이미 존재하는 리소스 import(재실행 안전), 일시적 오류 시 최대 3회 재시도.
 
 ```bash
 ./deploy.sh <walkthrough-project-id/>

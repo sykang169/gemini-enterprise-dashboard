@@ -17,10 +17,14 @@ git clone https://github.com/sykang169/gemini-enterprise-dashboard.git && cd gem
 # 2) 배포 (프로젝트 소유자/편집자 권한 + 결제 활성화 필요, ~7분)
 ./deploy.sh <YOUR_PROJECT_ID>
 
-# 3) 출력된 Looker Studio URL 을 열어 차트 배치 (looker_studio_setup.md 가이드 따라)
+# 3) Looker Studio 대시보드 구성 (looker_studio_setup.md 가이드 따라)
+#    - 최초 1회: 뷰를 데이터 소스로 연결해 차트 배치 (섹션 0)
+#    - 이후 자동: 그 리포트를 템플릿으로 등록하면 URL 하나로 완성형 대시보드 복제
 ```
 
-`deploy.sh`가 하는 일: 필요한 API 5개 활성화 → BigQuery 데이터셋 → Log Analytics 링크 → BQ↔Gemini 연결·IAM → (IAM 전파 5분 대기 내장) → Gemini 원격 모델 → 대시보드 뷰 22개 → (옵션) 콘텐츠 분류·예약 쿼리 → **바로 열 수 있는 Looker Studio URL 출력**.
+`deploy.sh`가 하는 일: 결제/인증 preflight → 필요한 API 활성화 → BigQuery 데이터셋 → Log Analytics 링크 → BQ↔Gemini 연결·IAM → (IAM 전파 5분 대기 내장) → Gemini 원격 모델 → 대시보드 뷰 22개 → (옵션) 콘텐츠 분류·예약 쿼리 → **Looker Studio 구성 안내(또는 템플릿 지정 시 완성형 대시보드 복제 URL) 출력**.
+
+> **Looker Studio 자동 생성:** Looker Studio는 차트를 코드로 맨바닥에서 만드는 API가 없어, 완성형 대시보드는 **템플릿 리포트 복제** 방식으로 자동화합니다. `looker_studio_setup.md` 섹션 0을 따라 한 번 템플릿을 만들고 `-var="looker_studio_template_report_id=<REPORT_ID>"`로 배포하면, 이후 어떤 프로젝트든 완성형 대시보드를 한 URL로 복제 생성합니다.
 
 ---
 
@@ -64,8 +68,8 @@ git clone https://github.com/sykang169/gemini-enterprise-dashboard.git && cd gem
 ├── deploy.sh                     # 원큐 배포 래퍼
 ├── tutorial.md                   # Cloud Shell 대화형 가이드
 ├── AUTOMATION.md                 # 자동화 상세 지도
-├── looker_studio_setup.md        # Looker Studio 차트 배치 가이드
-├── looker_studio_create_url.txt  # 22개 뷰 프리커넥트 URL (생성물)
+├── looker_studio_setup.md        # Looker Studio 생성·차트 배치·템플릿 등록 가이드
+├── looker_studio_create_url.txt  # 템플릿 복제 URL (생성물, 템플릿 지정 시에만)
 ├── log_analytics_dashboard_queries.sql  # 원본 KPI 쿼리 모음
 ├── sql/
 │   ├── 01_create_views.sql       # 뷰 22개 정의
@@ -171,7 +175,7 @@ terraform -chdir=terraform destroy -var project_id=my-gcp-project
 
 - **Forward-only**: Log Analytics는 활성화 시점 이후 로그만 인덱싱. 과거 로그 백필 불가 (Logs Explorer로 조회).
 - **보관 90일**: `_Default` 버킷 90일 초과 로그는 `_AllLogs`에서도 사라짐.
-- **Looker Studio 차트 배치는 수동**: Looker Studio는 IaC/API가 없어 프리커넥트 URL + `looker_studio_setup.md` 가이드로 대체.
+- **Looker Studio 차트 생성 API 없음**: Looker Studio는 차트를 코드로 만드는 API가 없어, 템플릿을 1회 수동 제작 후 **Linking API 템플릿 복제**로 완성형 대시보드를 자동 배포(`looker_studio_setup.md` 섹션 0). 커스텀 별칭을 맨바닥에서 넣는 from-scratch 방식은 Looker Studio가 지원하지 않음.
 - **엔드포인트**: 이 유형(gen-lang-client) 프로젝트에선 `gemini-2.5-flash-lite` / `gemini-2.5-flash`만 작동 확인됨.
 
 자세한 내용은 [`AUTOMATION.md`](AUTOMATION.md) 와 [`terraform/README.md`](terraform/README.md) 참고.

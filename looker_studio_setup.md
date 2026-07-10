@@ -3,6 +3,39 @@
 
 데이터 소스: BigQuery → `YOUR_PROJECT_ID` → `gemini_ent_dashboard` → 각 뷰(`v_*`)
 
+---
+
+## 섹션 0. 리포트 생성 + 데이터 연결 (최초 1회)
+
+> **왜 수동인가:** Looker Studio는 "차트가 배치된 리포트"를 코드로 맨바닥에서 만드는 API가 없습니다. 완성형 대시보드를 자동 배포하려면 **템플릿 리포트를 한 번 손으로 만든 뒤**, Linking API로 복제하는 방식뿐입니다(아래 0-C). 그러니 이 섹션은 딱 한 번만 하면 됩니다.
+
+### 0-A. 빈 리포트 만들고 데이터 소스 추가
+1. [lookerstudio.google.com](https://lookerstudio.google.com) → **빈 보고서 만들기**
+2. **데이터 추가 → BigQuery → `YOUR_PROJECT_ID` → `gemini_ent_dashboard`** 선택
+3. 아래 뷰들을 **각각 데이터 소스로 추가**합니다(리포트에 추가 → 계속 추가):
+   `v_daily_queries`, `v_daily_queries_by_method`, `v_daily_agent_calls`, `v_queries_per_user`, `v_daily_active_users`, `v_daily_failure_rate`, `v_streamassist_state`, `v_model_armor_block`, `v_model_armor_threats`, `v_model_armor_threats_long`, `v_hourly_heatmap`, `v_agent_usage_daily`, `v_response_latency_daily`, `v_grounding_top_sources`, `v_grounding_coverage_daily`, `v_user_activity_detail`, `v_model_armor_by_client`, `v_user_agent_trace`, `v_model_armor_verdict_daily`
+4. 아래 **섹션 A~11** 가이드대로 차트를 배치합니다.
+
+### 0-B. (권장) 데이터 자격증명 검토
+데이터 소스는 기본적으로 **소유자(Owner's) 자격증명**입니다 → 공유받은 사람이 BigQuery 권한 없이도 데이터를 봅니다. 로그에 사용자 이메일·질문 내용이 있으니, 광범위 공유 시엔 **Resource → Manage added data sources → 각 소스 Edit → Viewer's credentials**로 바꾸거나 신뢰 대상에게만 공유하세요.
+
+### 0-C. 자동 재배포를 위한 템플릿 등록 (선택, 강력 권장)
+이 리포트를 한 번 완성해두면, 다른 프로젝트에는 **완성형 대시보드를 URL 하나로 복제**할 수 있습니다:
+1. **각 데이터 소스의 별칭(Alias)을 뷰 이름과 똑같이** 설정합니다.
+   Resource → Manage added data sources → **Alias** 열을 `v_daily_queries`, `v_model_armor_block` … 처럼 뷰 이름으로 맞춤. (이 별칭이 자동 생성 URL의 `ds.<alias>`와 일치해야 함)
+2. 리포트 URL에서 **report id**를 복사합니다 — `.../reporting/`**`<REPORT_ID>`**`/page/...` 의 가운데 부분.
+3. 그 값을 넣어 다시 배포하면 완성형 복제 URL이 출력됩니다:
+   ```bash
+   terraform -chdir=terraform apply \
+     -var="project_id=<TARGET_PROJECT>" \
+     -var="looker_studio_template_report_id=<REPORT_ID>"
+   # 완료 후:
+   terraform -chdir=terraform output -raw looker_studio_url   # 차트까지 완성된 대시보드 복제 링크
+   ```
+   이 링크를 열면 대상 프로젝트의 뷰로 데이터가 연결된 **완성형 대시보드가 자동 생성**됩니다.
+
+---
+
 > ## 이 대시보드가 Gemini Enterprise 내장 애널리틱스보다 나은 이유
 > 일별 쿼리·사용자수 같은 기본 지표는 내장 대시보드가 이미 잘 보여줍니다. **이 대시보드의 진짜 가치는 내장이 안 보여주는 4가지**입니다. 대시보드 상단·별도 페이지에 이걸 강조하세요:
 > 1. **🛡️ Model Armor 보안** — 차단율·위협유형(폭력/혐오/성/CSAM). 내장 애널리틱스엔 없음.

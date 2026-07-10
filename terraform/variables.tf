@@ -65,6 +65,32 @@ variable "model_name" {
   default     = "gemini_flash"
 }
 
+variable "looker_studio_template_report_id" {
+  description = <<-EOT
+    Looker Studio TEMPLATE report id used to auto-generate a fully-built
+    dashboard (charts already laid out) for this project via the Linking API's
+    template-clone mode.
+
+    Looker Studio has NO API to create charts from scratch, so a complete
+    dashboard can only be produced by cloning a template report you built once.
+    One-time setup:
+      1. Deploy this module, then build the dashboard once by hand following
+         looker_studio_setup.md (add the v_* views, arrange charts).
+      2. Set EACH data source's alias (Resource > Manage added data sources >
+         Alias column) to its view name (v_daily_queries, v_model_armor_block, ...)
+         so the generated override URL lines up.
+      3. Copy the report id from the report URL (the segment between
+         /reporting/ and /page) and set it here.
+
+    Once set, `terraform output looker_studio_url` returns a deep link that
+    clones that template into any target project with its BigQuery data sources
+    repointed to that project's views. Leave empty ("") to skip URL generation
+    and get manual setup instructions instead.
+  EOT
+  type        = string
+  default     = ""
+}
+
 variable "gemini_endpoint" {
   description = <<-EOT
     Vertex AI generative model endpoint backing the remote model gemini_flash.

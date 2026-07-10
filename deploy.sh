@@ -153,21 +153,28 @@ until terraform -chdir="${TF_DIR}" apply -var="project_id=${PROJECT_ID}" "${EXTR
 done
 
 # ---------------------------------------------------------------------------
-# 5. Report the dashboard URL.
-#    The URL wires all ~19 views as data sources and is ~6 KB long. Printed to
-#    the terminal it wraps across many lines, and copying the wrapped text
-#    almost always truncates it — which makes Looker Studio complain
-#    "Missing value for ds.<view>.datasetId" for whichever view falls past the
-#    cut. So write it to a file as ONE unbroken line and copy it from there.
+# 5. Report the Looker Studio dashboard.
+#    Looker Studio has no API to create charts from scratch, so a fully-built
+#    dashboard is produced by cloning a TEMPLATE report (set once via
+#    -var="looker_studio_template_report_id=..."). When a template is set the
+#    output is a clone URL; otherwise it's manual setup instructions.
+#
+#    The clone URL wires all ~19 views and is ~6 KB long — printed to a wrapping
+#    terminal and copied, it truncates ("Missing value for ds.<view>.datasetId").
+#    So write it to a file as ONE unbroken line and copy it from there.
 # ---------------------------------------------------------------------------
-URL_FILE="${SCRIPT_DIR}/looker_studio_create_url.txt"
-terraform -chdir="${TF_DIR}" output -raw looker_studio_create_url > "${URL_FILE}"
+LS_OUTPUT="$(terraform -chdir="${TF_DIR}" output -raw looker_studio_url)"
 
 echo
-echo ">>> Deploy complete."
-echo ">>> Looker Studio 'create report' URL written to:"
-echo ">>>   ${URL_FILE}   ($(wc -c < "${URL_FILE}") chars)"
-echo ">>>"
-echo ">>> Open it as a SINGLE line (do NOT copy the wrapped terminal text, it"
-echo ">>> will truncate). In Cloud Shell:"
-echo ">>>   cloudshell edit ${URL_FILE}    # then Ctrl+A, Ctrl+C, paste into the browser"
+echo ">>> Deploy complete. BigQuery views are ready in ${PROJECT_ID}.${DASHBOARD_DATASET_ID}."
+echo
+if [[ "${LS_OUTPUT}" == http* ]]; then
+  URL_FILE="${SCRIPT_DIR}/looker_studio_create_url.txt"
+  printf '%s' "${LS_OUTPUT}" > "${URL_FILE}"
+  echo ">>> Looker Studio dashboard clone URL written to:"
+  echo ">>>   ${URL_FILE}   ($(wc -c < "${URL_FILE}") chars)"
+  echo ">>> Open it as a SINGLE line (do NOT copy wrapped terminal text — it truncates)."
+  echo ">>> In Cloud Shell:  cloudshell edit ${URL_FILE}   # Ctrl+A, Ctrl+C, paste in browser"
+else
+  echo "${LS_OUTPUT}"
+fi

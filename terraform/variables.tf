@@ -75,17 +75,18 @@ variable "looker_studio_template_report_id" {
     dashboard can only be produced by cloning a template report you built once.
     One-time setup:
       1. Deploy this module, then build the dashboard once by hand following
-         looker_studio_setup.md (add the v_* views, arrange charts).
-      2. Set EACH data source's alias (Resource > Manage added data sources >
-         Alias column) to its view name (v_daily_queries, v_model_armor_block, ...)
-         so the generated override URL lines up.
-      3. Copy the report id from the report URL (the segment between
+         looker_studio_setup.md (add the v_* views, arrange charts). All data
+         sources must be BigQuery tables in var.dashboard_dataset_id.
+      2. Copy the report id from the report URL (the segment between
          /reporting/ and /page) and set it here.
 
+    The generated clone URL uses the ds.* wildcard to repoint only the project
+    (keeping the template's dataset + table/view names), so data-source aliases
+    do NOT need to match view names.
+
     Once set, `terraform output looker_studio_url` returns a deep link that
-    clones that template into any target project with its BigQuery data sources
-    repointed to that project's views. Leave empty ("") to skip URL generation
-    and get manual setup instructions instead.
+    clones that template into this project. Leave empty ("") to skip URL
+    generation and get manual setup instructions instead.
   EOT
   type        = string
   default     = ""

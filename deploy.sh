@@ -157,11 +157,8 @@ done
 #    Looker Studio has no API to create charts from scratch, so a fully-built
 #    dashboard is produced by cloning a TEMPLATE report (set once via
 #    -var="looker_studio_template_report_id=..."). When a template is set the
-#    output is a clone URL; otherwise it's manual setup instructions.
-#
-#    The clone URL wires all ~19 views and is ~6 KB long — printed to a wrapping
-#    terminal and copied, it truncates ("Missing value for ds.<view>.datasetId").
-#    So write it to a file as ONE unbroken line and copy it from there.
+#    output is a short ds.* wildcard clone URL; otherwise it's manual setup
+#    instructions.
 # ---------------------------------------------------------------------------
 LS_OUTPUT="$(terraform -chdir="${TF_DIR}" output -raw looker_studio_url)"
 
@@ -169,12 +166,12 @@ echo
 echo ">>> Deploy complete. BigQuery views are ready in ${PROJECT_ID}.${DASHBOARD_DATASET_ID}."
 echo
 if [[ "${LS_OUTPUT}" == http* ]]; then
-  URL_FILE="${SCRIPT_DIR}/looker_studio_create_url.txt"
-  printf '%s' "${LS_OUTPUT}" > "${URL_FILE}"
-  echo ">>> Looker Studio dashboard clone URL written to:"
-  echo ">>>   ${URL_FILE}   ($(wc -c < "${URL_FILE}") chars)"
-  echo ">>> Open it as a SINGLE line (do NOT copy wrapped terminal text — it truncates)."
-  echo ">>> In Cloud Shell:  cloudshell edit ${URL_FILE}   # Ctrl+A, Ctrl+C, paste in browser"
+  printf '%s\n' "${LS_OUTPUT}" > "${SCRIPT_DIR}/looker_studio_create_url.txt"
+  echo ">>> Looker Studio 완성형 대시보드 복제 URL (템플릿 → 이 프로젝트):"
+  echo
+  echo "${LS_OUTPUT}"
+  echo
+  echo ">>> 위 URL을 브라우저에 열면 대시보드가 복제됩니다. (사본: looker_studio_create_url.txt)"
 else
   echo "${LS_OUTPUT}"
 fi

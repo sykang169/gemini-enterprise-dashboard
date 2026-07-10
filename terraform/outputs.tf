@@ -51,32 +51,30 @@ locals {
 
   # Template-clone deep link. Looker Studio has no API to create charts, so a
   # fully-built dashboard is produced by cloning a TEMPLATE report (built once,
-  # see var.looker_studio_template_report_id) and repointing each of its
-  # BigQuery data sources at THIS project's views. The ds.<alias> aliases must
-  # exactly match the data source aliases in the template — set each template
-  # data source's alias to its view name so this generation lines up.
+  # see var.looker_studio_template_report_id) and repointing its BigQuery data
+  # sources at THIS project.
   #
-  # NOTE the params vs. a from-scratch create URL: c.reportId (the template) is
-  # what makes the charts appear, and the report name is r.reportName (NOT
-  # c.reportName — using c.reportName is one reason the old from-scratch URL
-  # misbehaved).
-  looker_studio_clone_params = concat(
-    [
-      "c.reportId=${var.looker_studio_template_report_id}",
-      "c.mode=edit",
-      "r.reportName=${urlencode("Gemini Enterprise 운영·보안 대시보드 - ${var.project_id}")}",
-    ],
-    flatten([
-      for v in local.view_names : [
-        "ds.${v}.connector=bigQuery",
-        "ds.${v}.type=TABLE",
-        "ds.${v}.projectId=${var.project_id}",
-        "ds.${v}.billingProjectId=${var.project_id}",
-        "ds.${v}.datasetId=${var.dashboard_dataset_id}",
-        "ds.${v}.tableId=${v}",
-      ]
-    ])
-  )
+  # We use the ds.* WILDCARD and OMIT ds.*.connector on purpose. Per the Linking
+  # API spec, omitting the connector makes it UPDATE only the given params
+  # (projectId / billingProjectId / datasetId) rather than REPLACE the whole
+  # data source — so each source keeps its template tableId (= its view) and all
+  # the charts built on it. Since the template's dataset name and view names are
+  # identical across projects, repointing just the project is enough.
+  #
+  # Two big wins over listing every view: the URL stays tiny (no 19x6 param
+  # explosion → no copy-truncation), and the template's data-source ALIASES no
+  # longer have to match the view names (the wildcard hits them all).
+  #
+  # Also note r.reportName (NOT c.reportName — using c.reportName is one reason
+  # the old from-scratch URL misbehaved).
+  looker_studio_clone_params = [
+    "c.reportId=${var.looker_studio_template_report_id}",
+    "c.mode=edit",
+    "r.reportName=${urlencode("Gemini Enterprise 운영·보안 대시보드 - ${var.project_id}")}",
+    "ds.*.projectId=${var.project_id}",
+    "ds.*.billingProjectId=${var.project_id}",
+    "ds.*.datasetId=${var.dashboard_dataset_id}",
+  ]
 
   looker_studio_manual_steps = <<-EOT
     Looker Studio 리포트 수동 생성 (템플릿 미설정 상태):
@@ -86,8 +84,9 @@ locals {
          ${join(", ", local.view_names)}
       4) 상세 차트 구성: looker_studio_setup.md (섹션 A를 첫 페이지로 권장)
 
-    ▶ 이후 완전 자동 생성을 원하면: 위에서 만든 리포트를 템플릿으로 등록하세요.
-      각 데이터 소스의 별칭(Alias)을 해당 뷰 이름으로 설정 → report id를 복사 →
+    ▶ 이후 완전 자동 생성: 위에서 만든 리포트를 템플릿으로 등록하세요.
+      모든 데이터 소스가 ${var.dashboard_dataset_id} 뷰이기만 하면 됩니다(별칭 불문 —
+      복제 URL은 ds.* 와일드카드로 프로젝트만 갈아끼움). report id를 복사 →
       -var="looker_studio_template_report_id=<REPORT_ID>" 로 다시 apply 하면
       terraform output looker_studio_url 이 완성형 대시보드 복제 URL을 뽑아줍니다.
   EOT

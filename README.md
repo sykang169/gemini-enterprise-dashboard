@@ -22,7 +22,7 @@ git clone https://github.com/sykang169/gemini-enterprise-dashboard.git && cd gem
 #    - 이후 자동: 그 리포트를 템플릿으로 등록하면 URL 하나로 완성형 대시보드 복제
 ```
 
-`deploy.sh`가 하는 일: 결제/인증 preflight → 필요한 API 활성화 → BigQuery 데이터셋 → Log Analytics 링크 → BQ↔Gemini 연결·IAM → (IAM 전파 5분 대기 내장) → Gemini 원격 모델 → 대시보드 뷰 22개 → (옵션) 콘텐츠 분류·예약 쿼리 → **Looker Studio 구성 안내(또는 템플릿 지정 시 완성형 대시보드 복제 URL) 출력**.
+`deploy.sh`가 하는 일: 결제/인증 preflight → 필요한 API 활성화 → BigQuery 데이터셋 → Log Analytics 링크 → BQ↔Gemini 연결·IAM → (IAM 전파 5분 대기 내장) → Gemini 원격 모델 → 대시보드 뷰 23개 → (옵션) 콘텐츠 분류·예약 쿼리 → **Looker Studio 구성 안내(또는 템플릿 지정 시 완성형 대시보드 복제 URL) 출력**.
 
 > **Looker Studio 자동 생성:** Looker Studio는 차트를 코드로 맨바닥에서 만드는 API가 없어, 완성형 대시보드는 **템플릿 리포트 복제** 방식으로 자동화합니다. `looker_studio_setup.md` 섹션 0을 따라 한 번 템플릿을 만들고 `-var="looker_studio_template_report_id=<REPORT_ID>"`로 배포하면, 이후 어떤 프로젝트든 완성형 대시보드를 한 URL로 복제 생성합니다.
 
@@ -37,7 +37,7 @@ git clone https://github.com/sykang169/gemini-enterprise-dashboard.git && cd gem
 [_Default 로그 버킷 (Log Analytics 켜짐, 90일 보관)]
         │  federated (복사 없음, BigQuery 저장비 0)
         ▼
-[gemini_ent_analytics._AllLogs]  ── SQL 뷰 22개 ──▶ [Looker Studio (무료)]
+[gemini_ent_analytics._AllLogs]  ── SQL 뷰 23개 ──▶ [Looker Studio (무료)]
         │
         └─ (옵션) Model Armor 프롬프트 원문
              └─ BigQuery + Gemini(gemini-2.5-flash-lite) 분류
@@ -48,7 +48,7 @@ git clone https://github.com/sykang169/gemini-enterprise-dashboard.git && cd gem
 
 ---
 
-## 대시보드 지표 (22개 뷰)
+## 대시보드 지표 (23개 뷰)
 
 | 그룹 | 내용 | 내장 대비 |
 |------|------|-----------|
@@ -57,7 +57,7 @@ git clone https://github.com/sykang169/gemini-enterprise-dashboard.git && cd gem
 | **⚡ 지연** | 응답 p50/p95 (trace 기반), 사용자·에이전트별 | **없음** |
 | **📚 품질** | 그라운딩 커버리지(할루시네이션 리스크), 인용 출처 Top | **없음** |
 | **🧠 콘텐츠** | 질문 토픽 분포, 의도, 감성(부정 급증 경보) — Gemini 분류 | **없음** |
-| **👤 사용자** | 행 단위 드릴다운(user_id 필터) | 제한적 |
+| **👤 사용자** | 행 단위 드릴다운(user_id 필터), **질문 원문 검색**(`v_user_questions`) | 제한적 |
 
 ---
 
@@ -72,7 +72,7 @@ git clone https://github.com/sykang169/gemini-enterprise-dashboard.git && cd gem
 ├── looker_studio_create_url.txt  # 템플릿 복제 URL (생성물, 템플릿 지정 시에만)
 ├── log_analytics_dashboard_queries.sql  # 원본 KPI 쿼리 모음
 ├── sql/
-│   ├── 01_create_views.sql       # 뷰 22개 정의
+│   ├── 01_create_views.sql       # 뷰 20개 정의
 │   └── 02_content_classification.sql  # Gemini 콘텐츠 분류 (옵션)
 ├── notebook/
 │   └── gemini_enterprise_dashboard_setup.ipynb  # Python 대안 경로

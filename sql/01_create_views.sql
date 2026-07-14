@@ -266,3 +266,41 @@ SELECT TIMESTAMP_TRUNC(timestamp,DAY) AS day,
 FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs` WHERE log_name LIKE '%sanitize_operations'
 GROUP BY day, operation
 ;
+
+-- ---------------------------------------------------------------------
+-- v_user_questions
+--   Row-level view of the actual question text each user submitted --
+--   one row per query (no conversation-history duplication).
+--   Source: gemini_enterprise_user_activity log. user_id comes straight
+--   from userIamPrincipal (no join needed). Question text lives at two
+--   shapes by method: Search -> $.request.query is a scalar string;
+--   StreamAssist -> $.request.query is an object with parts[].text.
+--   COALESCE picks whichever is present.
+--   REQUIRES sensitive logging: the engine's
+--   observabilityConfig.sensitiveLoggingEnabled must be true, otherwise
+--   userIamPrincipal and the query text are masked to the literal
+--   "<elided>" (8 chars) at the source and this view shows placeholders.
+--   Not retroactive -- only logs written after enabling are un-masked.
+--   Use in Looker Studio as a Table chart with the built-in search box,
+--   or an Advanced Filter (contains) on question_text, combined with
+--   user_id / day controls to drill down.
+--   PRIVACY: this exposes raw prompt text + user identity -- restrict
+--   report sharing and dataset IAM.
+-- ---------------------------------------------------------------------
+CREATE OR REPLACE VIEW `YOUR_PROJECT_ID.gemini_ent_dashboard.v_user_questions` AS
+SELECT
+  timestamp,
+  TIMESTAMP_TRUNC(timestamp, DAY) AS day,
+  JSON_VALUE(json_payload,'$.userIamPrincipal') AS user_id,
+  JSON_VALUE(json_payload,'$.logMetadata.methodName') AS method,
+  COALESCE(
+    JSON_VALUE(json_payload,'$.request.query'),
+    (SELECT STRING_AGG(JSON_VALUE(p,'$.text'), '\n')
+       FROM UNNEST(JSON_QUERY_ARRAY(json_payload,'$.request.query.parts')) p
+       WHERE JSON_VALUE(p,'$.text') IS NOT NULL)
+  ) AS question_text,
+  trace
+FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs`
+WHERE log_name LIKE '%gemini_enterprise_user_activity'
+  AND JSON_VALUE(json_payload,'$.logMetadata.methodName') IN ('Search','StreamAssist')
+;

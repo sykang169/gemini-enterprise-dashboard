@@ -269,23 +269,30 @@ GROUP BY day, operation
 
 -- ---------------------------------------------------------------------
 -- v_user_questions
---   Row-level view of the actual question text each user submitted --
---   one row per query (no conversation-history duplication).
---   Source: gemini_enterprise_user_activity log. user_id comes straight
---   from userIamPrincipal (no join needed). Question text lives at two
---   shapes by method: Search -> $.request.query is a scalar string;
---   StreamAssist -> $.request.query is an object with parts[].text.
---   COALESCE picks whichever is present.
+--   Row-level Q&A view: the question each user asked AND the assistant's
+--   answer, one row per query (no conversation-history duplication).
+--   Source: gemini_enterprise_user_activity log -- both question and
+--   answer live in the SAME row, so no join is needed. user_id comes
+--   straight from userIamPrincipal.
+--     question_text: Search -> $.request.query (scalar string);
+--       StreamAssist -> $.request.query.parts[].text (object).
+--     answer_text (StreamAssist only; null for Search keyword lookups):
+--       grounded answers -> the answer is split across
+--       $...replies[].groundedContent.textGroundingMetadata.segments[].text,
+--       reassembled in startIndex order; ungrounded answers (state
+--       SKIPPED) -> $...replies[].groundedContent.content.text. COALESCE
+--       picks whichever shape the row uses. A few turns (empty/aborted
+--       replies) log no answer text -> answer_text is null.
 --   REQUIRES sensitive logging: the engine's
 --   observabilityConfig.sensitiveLoggingEnabled must be true, otherwise
---   userIamPrincipal and the query text are masked to the literal
---   "<elided>" (8 chars) at the source and this view shows placeholders.
---   Not retroactive -- only logs written after enabling are un-masked.
+--   userIamPrincipal / question / answer are masked to the literal
+--   "<elided>" (8 chars) at the source. Not retroactive -- only logs
+--   written after enabling are un-masked.
 --   Use in Looker Studio as a Table chart with the built-in search box,
---   or an Advanced Filter (contains) on question_text, combined with
---   user_id / day controls to drill down.
---   PRIVACY: this exposes raw prompt text + user identity -- restrict
---   report sharing and dataset IAM.
+--   or an Advanced Filter (contains) on question_text / answer_text,
+--   combined with user_id / day controls to drill down.
+--   PRIVACY: this exposes raw prompt AND answer text + user identity --
+--   restrict report sharing and dataset IAM.
 -- ---------------------------------------------------------------------
 CREATE OR REPLACE VIEW `YOUR_PROJECT_ID.gemini_ent_dashboard.v_user_questions` AS
 SELECT
@@ -299,6 +306,13 @@ SELECT
        FROM UNNEST(JSON_QUERY_ARRAY(json_payload,'$.request.query.parts')) p
        WHERE JSON_VALUE(p,'$.text') IS NOT NULL)
   ) AS question_text,
+  COALESCE(
+    (SELECT STRING_AGG(JSON_VALUE(seg,'$.text'), '' ORDER BY SAFE_CAST(JSON_VALUE(seg,'$.startIndex') AS INT64))
+       FROM UNNEST(JSON_QUERY_ARRAY(json_payload,'$.response.answer.replies')) r,
+            UNNEST(JSON_QUERY_ARRAY(r,'$.groundedContent.textGroundingMetadata.segments')) seg),
+    (SELECT MAX(JSON_VALUE(r,'$.groundedContent.content.text'))
+       FROM UNNEST(JSON_QUERY_ARRAY(json_payload,'$.response.answer.replies')) r)
+  ) AS answer_text,
   trace
 FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs`
 WHERE log_name LIKE '%gemini_enterprise_user_activity'

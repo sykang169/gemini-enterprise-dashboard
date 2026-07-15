@@ -141,13 +141,17 @@ git clone https://github.com/sykang169/gemini-enterprise-dashboard.git && cd gem
 ├── looker_studio_create_url.txt  # 템플릿 복제 URL (생성물, 템플릿 지정 시에만)
 ├── log_analytics_dashboard_queries.sql  # 원본 KPI 쿼리 모음
 ├── sql/
-│   ├── 01_create_views.sql       # 뷰 20개 정의
-│   └── 02_content_classification.sql  # Gemini 콘텐츠 분류 (옵션)
+│   ├── 01_create_views.sql       # 뷰 22개: 지표 20개 + v_log_source(차트용) + v_log_source_all(ad-hoc)
+│   ├── 02_content_classification.sql  # Gemini 콘텐츠 분류 (옵션)
+│   └── 03_archive_logs.sql       # 로그 아카이브 증분 MERGE (옵션)
 ├── notebook/
 │   └── gemini_enterprise_dashboard_setup.ipynb  # Python 대안 경로
 └── terraform/                    # IaC (apply 한 번으로 전체 구성)
     ├── apis.tf · providers.tf · variables.tf · datasets.tf
+    ├── backend.tf                # GCS 원격 state (다른 PC에서 배포해도 안전)
     ├── logging.tf · connection.tf · model_and_views.tf
+    ├── sensitive_logging.tf      # 옵션: 원문·사용자ID 마스킹 해제
+    ├── archive.tf                # 옵션: 로그 영구 보관 + 매시간 증분
     ├── scheduled_query.tf · outputs.tf
     ├── terraform.tfvars.example
     └── README.md
@@ -159,11 +163,19 @@ git clone https://github.com/sykang169/gemini-enterprise-dashboard.git && cd gem
 
 | 옵션 | 기본 | 설명 |
 |------|------|------|
+| `enable_sensitive_logging` | `false` | 질문·응답·사용자ID를 평문으로 기록 (**소급 불가** — 배포 전 결정). PII |
+| `sensitive_logging_engine_ids` | `[]` | 빈 값 = 이미 로깅 중인 엔진만 마스킹 해제. 지정 시 그 엔진의 관측성까지 활성화 |
+| `enable_log_archive` | `false` | 로그를 `t_logs_archive`에 영구 보관 (리텐션 만료 대비, **미리 켜야 의미 있음**) |
+| `enable_scheduled_archive` | `false` | 매시간 증분 아카이브. **차트가 아카이브만 읽으므로 이게 곧 대시보드 갱신 주기** |
+| `archive_schedule` | `every 1 hours` | 위 스케줄(UTC). `sql/03`의 lookback(3h)보다 길게 늘리지 말 것 |
+| `dashboard_window_days` | `90` | 차트가 읽는 기간 상한. 아카이브는 전부 보관 (`0` = 무제한) |
 | `enable_content_classification` | `false` | Gemini로 질문 토픽/감성 분류 (행당 Gemini 호출 비용) |
 | `enable_scheduled_classification` | `false` | 매일 03:00 KST 자동 재분류 (예약 쿼리) |
 
 - **Log Analytics / 뷰 / Looker Studio**: 사실상 무료 (로그 보관비 + 소량 BQ 스캔)
+- **로그 아카이브(옵션)**: 뷰가 읽는 로그만 담아 38일 기준 **11MB** — 저장비는 반올림하면 0. 매시간 MERGE가 실측 **21MB/회**
 - **콘텐츠 분류(옵션)**: `gemini-2.5-flash-lite` 사용으로 저비용. 분류한 건수만큼 과금
+- **차트 스캔**: 아카이브 전용 + 90일 윈도우로 조회당 **~1.3MB** (아카이브 전에는 7.5GB였음)
 
 ---
 

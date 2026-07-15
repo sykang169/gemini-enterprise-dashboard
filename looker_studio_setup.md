@@ -34,6 +34,9 @@
 2. **데이터 추가 → BigQuery → `YOUR_PROJECT_ID` → `gemini_ent_dashboard`** 선택
 3. 아래 뷰들을 **각각 데이터 소스로 추가**합니다(리포트에 추가 → 계속 추가):
    `v_daily_queries`, `v_daily_queries_by_method`, `v_daily_agent_calls`, `v_queries_per_user`, `v_daily_active_users`, `v_daily_failure_rate`, `v_streamassist_state`, `v_model_armor_block`, `v_model_armor_threats`, `v_model_armor_threats_long`, `v_hourly_heatmap`, `v_agent_usage_daily`, `v_response_latency_daily`, `v_grounding_top_sources`, `v_grounding_coverage_daily`, `v_user_activity_detail`, `v_model_armor_by_client`, `v_user_agent_trace`, `v_model_armor_verdict_daily`, `v_user_questions`
+   - ⚠️ **`v_log_source` / `v_log_source_all` / `t_logs_archive`는 데이터 소스로 추가하지 마세요.** 지표 뷰가 아니라 그 뷰들이 읽는 내부 배관(로그 원본)입니다. 특히 `v_log_source_all`은 무제한이라 차트를 붙이면 refresh마다 아카이브 전체를 스캔합니다. 오래된 이력 조회가 필요하면 Looker가 아니라 BigQuery 콘솔에서 `timestamp` 필터와 함께 쓰세요.
+   - ℹ️ **데이터 신선도**: 차트는 아카이브를 읽으므로 **최대 1시간 지연**됩니다(매시간 증분). 모든 지표가 일별 집계라 읽히는 값은 달라지지 않습니다.
+   - ℹ️ **차트 기본 사정거리는 90일**입니다(`dashboard_window_days`). 더 긴 추이가 필요하면 배포 시 이 값을 올리세요 — Looker에서 날짜 범위를 넓혀도 뷰가 이미 잘라낸 뒤라 안 나옵니다.
    - **콘텐츠 인텔리전스(A-8) 뷰** — 콘텐츠 분류(예약 쿼리)를 켠 프로젝트에만 존재: `v_topic_distribution`, `v_intent_distribution`, `v_sentiment_daily` (원본 결과 테이블은 `t_content_topics` — timestamp/day/topic/intent/sentiment).
 4. 아래 **섹션 A~11** 가이드대로 차트를 배치합니다.
 

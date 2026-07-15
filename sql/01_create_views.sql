@@ -5,21 +5,87 @@
 -- dataset YOUR_PROJECT_ID:gemini_ent_dashboard on 2026-07-08.
 -- This is a multi-statement script: run as-is via `bq query` or a
 -- google_bigquery_job Terraform resource. Order matters only in that
--- none of these views currently depend on one another (all read from
--- gemini_ent_analytics._AllLogs directly), so CREATE OR REPLACE is safe
--- to run in any order / re-run idempotently.
+-- every v_* view reads gemini_ent_dashboard.v_log_source, which this
+-- script defines FIRST -- so order matters now: the archive table and
+-- v_log_source must exist before the views that select from them. Among
+-- the v_* views themselves nothing depends on anything else, so
+-- CREATE OR REPLACE stays re-runnable.
 --
 -- Content-classification views (v_topic_distribution, v_intent_distribution,
 -- v_sentiment_daily) live separately in sql/02_content_classification.sql
 -- because they depend on the Gemini remote model and incur per-row cost.
 -- =====================================================================
 
+-- =====================================================================
+-- STEP 0 -- the log source every view reads
+-- =====================================================================
+-- WHY THIS EXISTS: gemini_ent_analytics._AllLogs is a LINKED dataset -- a
+-- VIEW over the _Default log bucket that stores 0 bytes of its own (verified:
+-- type=VIEW, numBytes=0). The bucket's retention is therefore a hard floor on
+-- how far back ANY view can see: at the default 30 days the whole dashboard
+-- silently becomes a 30-day rolling window, and expired logs are gone for
+-- good (Log Analytics has no backfill).
+--
+-- v_log_source stitches the two halves together:
+--   t_logs_archive  -- durable copy (sql/03_archive_logs.sql), outlives
+--                      retention expiry
+--   _AllLogs        -- everything newer than the archive's watermark, so the
+--                      dashboard stays live between archive runs
+-- Views read this instead of _AllLogs and get permanent history plus fresh
+-- rows without a single per-view change.
+
+-- The archive table is created HERE, not in sql/03, even though sql/03 is
+-- what fills it. Reason: sql/03 is opt-in (var.enable_log_archive) but
+-- v_log_source references the table unconditionally -- if the table only
+-- existed when archiving was on, every default deploy would die on "table not
+-- found". Created empty, it lets v_log_source degrade cleanly to "just
+-- _AllLogs": exactly the pre-archive behaviour.
+CREATE TABLE IF NOT EXISTS `YOUR_PROJECT_ID.gemini_ent_dashboard.t_logs_archive`
+PARTITION BY DATE(timestamp)
+CLUSTER BY log_name
+OPTIONS (
+  description = "Durable copy of the dashboard's source logs, surviving _Default bucket retention. Created empty by sql/01; filled incrementally by sql/03_archive_logs.sql when var.enable_log_archive is on. Deduped on (log_name, timestamp, insert_id)."
+)
+AS SELECT * FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs` WHERE FALSE
+;
+
+CREATE OR REPLACE VIEW `YOUR_PROJECT_ID.gemini_ent_dashboard.v_log_source` AS
+SELECT * FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.t_logs_archive`
+UNION ALL
+SELECT * FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs`
+-- The COALESCE is load-bearing, not defensive padding. On an empty archive
+-- MAX(timestamp) is NULL, and `timestamp > NULL` evaluates to NULL, which
+-- filters out EVERY row. Without the fallback a deploy with archiving off
+-- (the default) would hand every view an empty table and blank the whole
+-- dashboard. Verified against the live dataset.
+WHERE timestamp > (
+  SELECT COALESCE(MAX(timestamp), TIMESTAMP("1970-01-01"))
+  FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.t_logs_archive`
+)
+-- KEEP THIS FILTER IN SYNC WITH sql/03_archive_logs.sql. Both halves of the
+-- UNION must carry the same rows, or a metric would jump the moment a row
+-- crossed the watermark from the live side to the archived side.
+AND (
+  log_name LIKE '%gemini_enterprise_user_activity'
+  OR log_name LIKE '%gen_ai.user.message'
+  OR log_name LIKE '%gen_ai.choice'
+  OR log_name LIKE '%api_errors'
+  -- Model Armor: real end-user prompts only. client_name=VERTEX_AI rows are
+  -- this dashboard's own ML.GENERATE_TEXT classification traffic caught by
+  -- the project-wide floor setting -- 99.93% of MA volume.
+  OR (
+    log_name LIKE '%sanitize_operations'
+    AND JSON_VALUE(labels,'$."modelarmor.googleapis.com/client_name"') LIKE 'GEMINI_ENTERPRISE%'
+  )
+)
+;
+
 -- ---------------------------------------------------------------------
 -- v_daily_queries
 -- ---------------------------------------------------------------------
 CREATE OR REPLACE VIEW `YOUR_PROJECT_ID.gemini_ent_dashboard.v_daily_queries` AS
 SELECT TIMESTAMP_TRUNC(timestamp, DAY) AS day, COUNT(*) AS queries
-FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs` WHERE log_name LIKE '%gemini_enterprise_user_activity' AND JSON_VALUE(json_payload,'$.logMetadata.methodName') IN ('Search','StreamAssist') GROUP BY day
+FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.v_log_source` WHERE log_name LIKE '%gemini_enterprise_user_activity' AND JSON_VALUE(json_payload,'$.logMetadata.methodName') IN ('Search','StreamAssist') GROUP BY day
 ;
 
 -- ---------------------------------------------------------------------
@@ -28,7 +94,7 @@ FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs` WHERE log_name LIKE '%gemin
 CREATE OR REPLACE VIEW `YOUR_PROJECT_ID.gemini_ent_dashboard.v_daily_queries_by_method` AS
 SELECT TIMESTAMP_TRUNC(timestamp, DAY) AS day,
   JSON_VALUE(json_payload,'$.logMetadata.methodName') AS method, COUNT(*) AS calls
-FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs` WHERE log_name LIKE '%gemini_enterprise_user_activity' AND JSON_VALUE(json_payload,'$.logMetadata.methodName') IN ('Search','StreamAssist') GROUP BY day, method
+FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.v_log_source` WHERE log_name LIKE '%gemini_enterprise_user_activity' AND JSON_VALUE(json_payload,'$.logMetadata.methodName') IN ('Search','StreamAssist') GROUP BY day, method
 ;
 
 -- ---------------------------------------------------------------------
@@ -36,7 +102,7 @@ FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs` WHERE log_name LIKE '%gemin
 -- ---------------------------------------------------------------------
 CREATE OR REPLACE VIEW `YOUR_PROJECT_ID.gemini_ent_dashboard.v_daily_agent_calls` AS
 SELECT TIMESTAMP_TRUNC(timestamp, DAY) AS day, COUNT(*) AS agent_calls
-FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs` WHERE log_name LIKE '%gemini_enterprise_user_activity' AND JSON_VALUE(json_payload,'$.logMetadata.methodName')='StreamAssist' GROUP BY day
+FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.v_log_source` WHERE log_name LIKE '%gemini_enterprise_user_activity' AND JSON_VALUE(json_payload,'$.logMetadata.methodName')='StreamAssist' GROUP BY day
 ;
 
 -- ---------------------------------------------------------------------
@@ -47,7 +113,7 @@ SELECT JSON_VALUE(json_payload,'$.userIamPrincipal') AS user_id,
   COUNTIF(JSON_VALUE(json_payload,'$.logMetadata.methodName')='StreamAssist') AS agent_calls,
   COUNTIF(JSON_VALUE(json_payload,'$.logMetadata.methodName')='Search') AS searches,
   COUNT(*) AS total_queries
-FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs` WHERE log_name LIKE '%gemini_enterprise_user_activity' AND JSON_VALUE(json_payload,'$.logMetadata.methodName') IN ('Search','StreamAssist') GROUP BY user_id
+FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.v_log_source` WHERE log_name LIKE '%gemini_enterprise_user_activity' AND JSON_VALUE(json_payload,'$.logMetadata.methodName') IN ('Search','StreamAssist') GROUP BY user_id
 ;
 
 -- ---------------------------------------------------------------------
@@ -58,7 +124,7 @@ SELECT TIMESTAMP_TRUNC(timestamp, DAY) AS day,
   COUNT(DISTINCT JSON_VALUE(json_payload,'$.userIamPrincipal')) AS active_users,
   COUNT(*) AS queries,
   ROUND(SAFE_DIVIDE(COUNT(*),COUNT(DISTINCT JSON_VALUE(json_payload,'$.userIamPrincipal'))),2) AS queries_per_user
-FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs` WHERE log_name LIKE '%gemini_enterprise_user_activity' AND JSON_VALUE(json_payload,'$.logMetadata.methodName') IN ('Search','StreamAssist') GROUP BY day
+FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.v_log_source` WHERE log_name LIKE '%gemini_enterprise_user_activity' AND JSON_VALUE(json_payload,'$.logMetadata.methodName') IN ('Search','StreamAssist') GROUP BY day
 ;
 
 -- ---------------------------------------------------------------------
@@ -69,7 +135,7 @@ SELECT TIMESTAMP_TRUNC(timestamp, DAY) AS day,
   COUNTIF(severity IN ('ERROR','CRITICAL','ALERT','EMERGENCY')) AS failures,
   COUNT(*) AS total,
   ROUND(SAFE_DIVIDE(COUNTIF(severity IN ('ERROR','CRITICAL','ALERT','EMERGENCY')),COUNT(*))*100,2) AS failure_pct
-FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs` WHERE log_name LIKE '%gemini_enterprise_user_activity' GROUP BY day
+FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.v_log_source` WHERE log_name LIKE '%gemini_enterprise_user_activity' GROUP BY day
 ;
 
 -- ---------------------------------------------------------------------
@@ -78,7 +144,7 @@ FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs` WHERE log_name LIKE '%gemin
 CREATE OR REPLACE VIEW `YOUR_PROJECT_ID.gemini_ent_dashboard.v_streamassist_state` AS
 SELECT TIMESTAMP_TRUNC(timestamp, DAY) AS day,
   COALESCE(JSON_VALUE(json_payload,'$.response.answer.state'),'UNKNOWN') AS state, COUNT(*) AS n
-FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs` WHERE log_name LIKE '%gemini_enterprise_user_activity' AND JSON_VALUE(json_payload,'$.logMetadata.methodName')='StreamAssist' GROUP BY day, state
+FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.v_log_source` WHERE log_name LIKE '%gemini_enterprise_user_activity' AND JSON_VALUE(json_payload,'$.logMetadata.methodName')='StreamAssist' GROUP BY day, state
 ;
 
 -- ---------------------------------------------------------------------
@@ -112,7 +178,7 @@ SELECT TIMESTAMP_TRUNC(timestamp, DAY) AS day,
   COUNTIF(JSON_VALUE(json_payload,'$.sanitizationResult.filterMatchState')='MATCH_FOUND') AS blocked,
   COUNT(*) AS inspected,
   ROUND(SAFE_DIVIDE(COUNTIF(JSON_VALUE(json_payload,'$.sanitizationResult.filterMatchState')='MATCH_FOUND'),COUNT(*))*100,2) AS block_pct
-FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs` WHERE log_name LIKE '%sanitize_operations'
+FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.v_log_source` WHERE log_name LIKE '%sanitize_operations'
   AND JSON_VALUE(labels,'$."modelarmor.googleapis.com/client_name"') LIKE 'GEMINI_ENTERPRISE%' GROUP BY day, operation
 ;
 
@@ -126,7 +192,7 @@ SELECT TIMESTAMP_TRUNC(timestamp, DAY) AS day,
   COUNTIF(JSON_VALUE(json_payload,'$.sanitizationResult.filterResults.rai.raiFilterResult.raiFilterTypeResults.hate_speech.matchState')='MATCH_FOUND') AS hate_speech,
   COUNTIF(JSON_VALUE(json_payload,'$.sanitizationResult.filterResults.rai.raiFilterResult.raiFilterTypeResults.sexually_explicit.matchState')='MATCH_FOUND') AS sexually_explicit,
   COUNTIF(JSON_VALUE(json_payload,'$.sanitizationResult.filterResults.csam.csamFilterFilterResult.matchState')='MATCH_FOUND') AS csam
-FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs` WHERE log_name LIKE '%sanitize_operations'
+FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.v_log_source` WHERE log_name LIKE '%sanitize_operations'
   AND JSON_VALUE(labels,'$."modelarmor.googleapis.com/client_name"') LIKE 'GEMINI_ENTERPRISE%' GROUP BY day
 ;
 
@@ -146,7 +212,7 @@ WITH base AS (
    COUNTIF(JSON_VALUE(json_payload,'$.sanitizationResult.filterResults.rai.raiFilterResult.raiFilterTypeResults.sexually_explicit.matchState')='MATCH_FOUND') sexually_explicit,
    COUNTIF(JSON_VALUE(json_payload,'$.sanitizationResult.filterResults.csam.csamFilterFilterResult.matchState')='MATCH_FOUND') csam,
    COUNTIF(JSON_VALUE(json_payload,'$.sanitizationResult.filterResults.pi_and_jailbreak.piAndJailbreakFilterResult.matchState')='MATCH_FOUND') prompt_injection
-  FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs` WHERE log_name LIKE '%sanitize_operations'
+  FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.v_log_source` WHERE log_name LIKE '%sanitize_operations'
   AND JSON_VALUE(labels,'$."modelarmor.googleapis.com/client_name"') LIKE 'GEMINI_ENTERPRISE%' GROUP BY day )
  GROUP BY day )
 SELECT day, threat_type, threat_count FROM base
@@ -158,7 +224,7 @@ UNPIVOT(threat_count FOR threat_type IN (dangerous,harassment,hate_speech,sexual
 -- ---------------------------------------------------------------------
 CREATE OR REPLACE VIEW `YOUR_PROJECT_ID.gemini_ent_dashboard.v_hourly_heatmap` AS
 SELECT FORMAT_TIMESTAMP('%A', timestamp) AS weekday, EXTRACT(HOUR FROM timestamp) AS hour_of_day, COUNT(*) AS queries
-FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs` WHERE log_name LIKE '%gemini_enterprise_user_activity' AND JSON_VALUE(json_payload,'$.logMetadata.methodName') IN ('Search','StreamAssist') GROUP BY weekday, hour_of_day
+FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.v_log_source` WHERE log_name LIKE '%gemini_enterprise_user_activity' AND JSON_VALUE(json_payload,'$.logMetadata.methodName') IN ('Search','StreamAssist') GROUP BY weekday, hour_of_day
 ;
 
 -- ---------------------------------------------------------------------
@@ -168,7 +234,7 @@ CREATE OR REPLACE VIEW `YOUR_PROJECT_ID.gemini_ent_dashboard.v_agent_usage_daily
 SELECT TIMESTAMP_TRUNC(timestamp, DAY) AS day,
   JSON_VALUE(resource.labels,'$.agent_id') AS agent_id,
   COUNT(*) AS user_turns
-FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs` WHERE log_name LIKE '%gen_ai.user.message'
+FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.v_log_source` WHERE log_name LIKE '%gen_ai.user.message'
 GROUP BY day, agent_id
 ;
 
@@ -179,7 +245,7 @@ CREATE OR REPLACE VIEW `YOUR_PROJECT_ID.gemini_ent_dashboard.v_response_latency_
 WITH g AS (
   SELECT trace, JSON_VALUE(resource.labels,'$.agent_id') AS agent_id,
     JSON_VALUE(labels,'$."event.name"') AS ev, timestamp
-  FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs`
+  FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.v_log_source`
   WHERE (log_name LIKE '%gen_ai.user.message' OR log_name LIKE '%gen_ai.choice') AND trace IS NOT NULL ),
 per_trace AS (
   SELECT trace, ANY_VALUE(agent_id) agent_id,
@@ -201,7 +267,7 @@ CREATE OR REPLACE VIEW `YOUR_PROJECT_ID.gemini_ent_dashboard.v_grounding_top_sou
 SELECT COALESCE(NULLIF(JSON_VALUE(ref,'$.documentMetadata.domain'),''),
                 NET.HOST(JSON_VALUE(ref,'$.documentMetadata.uri')),'(unknown)') AS source,
   COUNT(*) AS citations
-FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs`,
+FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.v_log_source`,
   UNNEST(JSON_QUERY_ARRAY(json_payload,'$.response.answer.replies')) rep,
   UNNEST(JSON_QUERY_ARRAY(rep,'$.groundedContent.textGroundingMetadata.references')) ref
 WHERE log_name LIKE '%gemini_enterprise_user_activity'
@@ -221,7 +287,7 @@ FROM (
   SELECT timestamp,
     (SELECT COUNT(*) FROM UNNEST(JSON_QUERY_ARRAY(json_payload,'$.response.answer.replies')) rep,
        UNNEST(JSON_QUERY_ARRAY(rep,'$.groundedContent.textGroundingMetadata.references')) ref) AS ref_count
-  FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs`
+  FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.v_log_source`
   WHERE log_name LIKE '%gemini_enterprise_user_activity'
     AND JSON_VALUE(json_payload,'$.logMetadata.methodName')='StreamAssist' )
 GROUP BY day
@@ -238,7 +304,7 @@ SELECT timestamp, TIMESTAMP_TRUNC(timestamp,DAY) AS day,
   (SELECT COUNT(*) FROM UNNEST(JSON_QUERY_ARRAY(json_payload,'$.response.answer.replies')) rep,
      UNNEST(JSON_QUERY_ARRAY(rep,'$.groundedContent.textGroundingMetadata.references')) ref) AS source_count,
   severity
-FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs`
+FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.v_log_source`
 WHERE log_name LIKE '%gemini_enterprise_user_activity'
   AND JSON_VALUE(json_payload,'$.logMetadata.methodName') IN ('Search','StreamAssist')
 ;
@@ -254,7 +320,7 @@ SELECT TIMESTAMP_TRUNC(timestamp,DAY) AS day,
   COUNTIF(JSON_VALUE(json_payload,'$.sanitizationResult.filterMatchState')='MATCH_FOUND') AS blocked,
   COUNT(*) AS inspected,
   ROUND(SAFE_DIVIDE(COUNTIF(JSON_VALUE(json_payload,'$.sanitizationResult.filterMatchState')='MATCH_FOUND'),COUNT(*))*100,2) AS block_pct
-FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs` WHERE log_name LIKE '%sanitize_operations'
+FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.v_log_source` WHERE log_name LIKE '%sanitize_operations'
   AND JSON_VALUE(labels,'$."modelarmor.googleapis.com/client_name"') LIKE 'GEMINI_ENTERPRISE%'
 GROUP BY day, client_name, operation, template_id
 ;
@@ -265,13 +331,13 @@ GROUP BY day, client_name, operation, template_id
 CREATE OR REPLACE VIEW `YOUR_PROJECT_ID.gemini_ent_dashboard.v_user_agent_trace` AS
 WITH ua AS (
   SELECT trace, MAX(JSON_VALUE(json_payload,'$.userIamPrincipal')) user_id
-  FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs` WHERE log_name LIKE '%gemini_enterprise_user_activity' AND trace IS NOT NULL GROUP BY trace ),
+  FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.v_log_source` WHERE log_name LIKE '%gemini_enterprise_user_activity' AND trace IS NOT NULL GROUP BY trace ),
 ga AS (
   SELECT trace,
     MAX(JSON_VALUE(resource.labels,'$.agent_id')) agent_id,
     MAX(IF(JSON_VALUE(labels,'$."event.name"')='gen_ai.user.message',timestamp,NULL)) req_ts,
     MAX(IF(JSON_VALUE(labels,'$."event.name"')='gen_ai.choice',timestamp,NULL)) resp_ts
-  FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs` WHERE log_name LIKE '%2Fgen_ai%' AND trace IS NOT NULL GROUP BY trace )
+  FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.v_log_source` WHERE log_name LIKE '%2Fgen_ai%' AND trace IS NOT NULL GROUP BY trace )
 SELECT TIMESTAMP_TRUNC(COALESCE(ga.req_ts,ga.resp_ts),DAY) AS day,
   ua.user_id, ga.agent_id,
   COUNT(*) AS turns,
@@ -289,7 +355,7 @@ SELECT TIMESTAMP_TRUNC(timestamp,DAY) AS day,
   COUNT(*) AS checks,
   COUNTIF(JSON_VALUE(json_payload,'$.sanitizationResult.sanitizationVerdict')='MODEL_ARMOR_SANITIZATION_VERDICT_BLOCK') AS blocked,
   COUNTIF(JSON_VALUE(json_payload,'$.sanitizationResult.filterResults.pi_and_jailbreak.piAndJailbreakFilterResult.matchState')='MATCH_FOUND') AS injection_attempts
-FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs` WHERE log_name LIKE '%sanitize_operations'
+FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.v_log_source` WHERE log_name LIKE '%sanitize_operations'
   AND JSON_VALUE(labels,'$."modelarmor.googleapis.com/client_name"') LIKE 'GEMINI_ENTERPRISE%'
 GROUP BY day, operation
 ;
@@ -341,7 +407,7 @@ SELECT
        FROM UNNEST(JSON_QUERY_ARRAY(json_payload,'$.response.answer.replies')) r)
   ) AS answer_text,
   trace
-FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs`
+FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.v_log_source`
 WHERE log_name LIKE '%gemini_enterprise_user_activity'
   AND JSON_VALUE(json_payload,'$.logMetadata.methodName') IN ('Search','StreamAssist')
 ;

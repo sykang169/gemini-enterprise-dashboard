@@ -41,6 +41,62 @@ gcloud billing accounts list
 gcloud billing projects link <walkthrough-project-id/> --billing-account=<ACCOUNT_ID>
 ```
 
+## (선택) Model Armor 연결 — 보안 지표 10개의 전제
+
+대시보드 지표 24개 중 **10개가 Model Armor 로그에 의존**합니다(차단율, 위협유형, 프롬프트 인젝션, verdict, 업무/비업무 분류). MA를 안 붙이면 이 뷰들은 **배포는 되지만 영원히 빈 채로** 남습니다. 이 모듈은 MA를 자동 구성하지 않으니, 보안 지표가 필요하면 아래를 먼저 하세요.
+
+**1) API 활성화 + 권한** — `roles/modelarmor.admin`이 필요합니다.
+
+```bash
+gcloud services enable modelarmor.googleapis.com --project=<walkthrough-project-id/>
+```
+
+**2) 템플릿 생성** — ⚠️ **`--template-metadata-log-sanitize-operations`가 이 대시보드의 생명줄입니다.** 이 플래그가 없으면 MA는 검사만 하고 **로그를 안 남겨** 위 10개 뷰가 영원히 빕니다. 기본값이 아니니 반드시 넣으세요.
+
+```bash
+gcloud model-armor templates create ge-dashboard-armor \
+  --project=<walkthrough-project-id/> \
+  --location=us \
+  --rai-settings-filters='[{"filterType":"HATE_SPEECH","confidenceLevel":"MEDIUM_AND_ABOVE"},{"filterType":"HARASSMENT","confidenceLevel":"MEDIUM_AND_ABOVE"},{"filterType":"DANGEROUS","confidenceLevel":"MEDIUM_AND_ABOVE"},{"filterType":"SEXUALLY_EXPLICIT","confidenceLevel":"MEDIUM_AND_ABOVE"}]' \
+  --pi-and-jailbreak-filter-settings-enforcement=enabled \
+  --pi-and-jailbreak-filter-settings-confidence-level=MEDIUM_AND_ABOVE \
+  --malicious-uri-filter-settings-enforcement=enabled \
+  --template-metadata-log-sanitize-operations
+```
+
+<walkthrough-footnote><b>location 주의</b>: 템플릿은 Gemini Enterprise 인스턴스와 <b>같은 프로젝트·같은 location</b>이어야 합니다. 이 저장소의 기본 배포 대상은 <code>us</code>입니다(BigQuery 데이터셋과 동일). REST로 직접 만들 때는 호스트가 리전형입니다 — <code>https://modelarmor.<b>us</b>.rep.googleapis.com/v1/projects/&lt;P&gt;/locations/us/templates?template_id=ge-dashboard-armor</code>. 프롬프트용/응답용 템플릿을 나눠 쓸 수도 있습니다.</walkthrough-footnote>
+
+**3) Gemini Enterprise에 연결** — 설정은 engine이 아니라 그 아래 **assistant**에 붙습니다. gcloud 명령이 없어 REST로 PATCH합니다.
+
+```bash
+PROJ=<walkthrough-project-id/>
+ENGINE=<YOUR_ENGINE_ID>    # 예: gemini-enterprise-1782188315701
+TPL="projects/$PROJ/locations/us/templates/ge-dashboard-armor"
+
+curl -X PATCH \
+  -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+  -H "Content-Type: application/json" \
+  -d "{\"customerPolicy\":{\"modelArmorConfig\":{
+        \"userPromptTemplate\":\"$TPL\",
+        \"responseTemplate\":\"$TPL\",
+        \"failureMode\":\"FAIL_OPEN\"}}}" \
+  "https://discoveryengine.googleapis.com/v1alpha/projects/$PROJ/locations/global/collections/default_collection/engines/$ENGINE/assistants/default_assistant?updateMask=customerPolicy.modelArmorConfig"
+```
+
+- `failureMode`: `FAIL_OPEN`(MA 장애 시 통과) / `FAIL_CLOSED`(차단). 가용성이 우선이면 전자, 보안이 우선이면 후자.
+- `updateMask`는 **leaf 경로**(`customerPolicy.modelArmorConfig`)를 씁니다. 상위인 `customerPolicy`만 주면 그 객체 전체가 교체돼 다른 정책이 조용히 사라집니다.
+- 엔진 ID는 `gcloud`로 확인: `curl -H "Authorization: Bearer $(gcloud auth print-access-token)" "https://discoveryengine.googleapis.com/v1alpha/projects/$PROJ/locations/global/collections/default_collection/engines"`
+
+**4) 확인** — 붙었는지 되읽어봅니다.
+
+```bash
+curl -s -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+  "https://discoveryengine.googleapis.com/v1alpha/projects/$PROJ/locations/global/collections/default_collection/engines/$ENGINE/assistants/default_assistant" \
+  | grep -A5 customerPolicy
+```
+
+<walkthrough-footnote>Search 전용 앱에는 <code>default_assistant</code>가 없어 404가 납니다(어시스턴트 대화가 없으니 정상). MA는 어시스턴트가 있는 앱에만 붙습니다. 연결 후 앱에서 질문을 하나 던지면 몇 분 뒤 <code>v_model_armor_block</code>에 행이 쌓이기 시작합니다.</walkthrough-footnote>
+
 ## 질문·응답 원문 로깅 (지금 결정하세요)
 
 **이 선택은 배포 전에 해야 합니다. 나중에 켜면 소급이 안 됩니다.**

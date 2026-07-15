@@ -75,6 +75,7 @@ TPL="projects/$PROJ/locations/us/templates/ge-dashboard-armor"
 
 curl -X PATCH \
   -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+  -H "X-Goog-User-Project: $PROJ" \
   -H "Content-Type: application/json" \
   -d "{\"customerPolicy\":{\"modelArmorConfig\":{
         \"userPromptTemplate\":\"$TPL\",
@@ -85,12 +86,20 @@ curl -X PATCH \
 
 - `failureMode`: `FAIL_OPEN`(MA 장애 시 통과) / `FAIL_CLOSED`(차단). 가용성이 우선이면 전자, 보안이 우선이면 후자.
 - `updateMask`는 **leaf 경로**(`customerPolicy.modelArmorConfig`)를 씁니다. 상위인 `customerPolicy`만 주면 그 객체 전체가 교체돼 다른 정책이 조용히 사라집니다.
-- 엔진 ID는 `gcloud`로 확인: `curl -H "Authorization: Bearer $(gcloud auth print-access-token)" "https://discoveryengine.googleapis.com/v1alpha/projects/$PROJ/locations/global/collections/default_collection/engines"`
+- `X-Goog-User-Project` 헤더는 **빼면 안 됩니다.** discoveryengine은 quota project를 요구하는데, `gcloud auth print-access-token`으로 뽑은 토큰만 든 curl에는 그게 실려가지 않습니다(gcloud는 명령 실행 시 `core/project`를 읽어 알아서 붙여주지만, 토큰 자체에는 없습니다). 헤더가 없으면 API가 이 호출을 **gcloud CLI 자신의 클라이언트 프로젝트**(`32555940559`)로 귀속시키고 403 `SERVICE_DISABLED`를 돌려줍니다 — "내 프로젝트에 API가 꺼졌다"거나 "권한이 없다"처럼 읽히지만 둘 다 아닙니다. (서비스 계정 토큰은 자기 프로젝트를 갖고 있어 이 문제가 안 나타납니다. Cloud Shell처럼 **사용자 계정**으로 실행할 때만 터지는 이유입니다.)
+- 위 헤더를 쓰려면 `$PROJ`에 대한 `serviceusage.services.use` 권한이 필요합니다. 없으면 403이 `USER_PROJECT_DENIED`로 바뀝니다(consumer가 `32555940559`가 아니라 `$PROJ`로 나오면 헤더는 제대로 간 것이고, 권한만 없는 상태입니다). 프로젝트 오너면 이미 포함돼 있고, 아니면:
+  ```bash
+  gcloud projects add-iam-policy-binding $PROJ \
+    --member="user:$(gcloud config get-value account)" \
+    --role="roles/serviceusage.serviceUsageConsumer"
+  ```
+- 엔진 ID는 `gcloud`로 확인: `curl -H "Authorization: Bearer $(gcloud auth print-access-token)" -H "X-Goog-User-Project: $PROJ" "https://discoveryengine.googleapis.com/v1alpha/projects/$PROJ/locations/global/collections/default_collection/engines"`
 
 **4) 확인** — 붙었는지 되읽어봅니다.
 
 ```bash
 curl -s -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+  -H "X-Goog-User-Project: $PROJ" \
   "https://discoveryengine.googleapis.com/v1alpha/projects/$PROJ/locations/global/collections/default_collection/engines/$ENGINE/assistants/default_assistant" \
   | grep -A5 customerPolicy
 ```

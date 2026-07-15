@@ -110,6 +110,62 @@ variable "gemini_endpoint" {
   default     = "gemini-2.5-flash-lite"
 }
 
+variable "enable_sensitive_logging" {
+  description = <<-EOT
+    Opt-in flag that PATCHes observabilityConfig.sensitiveLoggingEnabled on
+    every targeted Gemini Enterprise engine (see sensitive_logging.tf), which
+    is what makes prompts, responses, and real user identities appear in the
+    logs as plain text instead of the 8-char token `<elided>`.
+
+    Without this, the following views exist but are empty or collapse onto a
+    single `<elided>` user: v_user_questions, v_queries_per_user,
+    v_daily_active_users, v_user_activity_detail, v_user_agent_trace — and
+    sql/02 content classification has no question text to classify.
+
+    FORWARD-ONLY: enabling this does NOT backfill. Logs already written with
+    `<elided>` stay masked permanently. Enable it AT DEPLOY TIME if you want
+    prompt-level analytics at all:
+      ./deploy.sh <PROJECT_ID> -var="enable_sensitive_logging=true"
+
+    Defaults to false because it writes end-user PII in the clear into Cloud
+    Logging and, via the linked dataset, into BigQuery. Lock down IAM on the
+    analytics + dashboard datasets before turning it on.
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "sensitive_logging_engine_ids" {
+  description = <<-EOT
+    Gemini Enterprise engine ids to apply var.enable_sensitive_logging to,
+    e.g. ["my-app_1782188315701"]. Engines are assumed to live at
+    locations/global under collections/default_collection.
+
+    Empty list (the default) = AUTO MODE: unmask only the engines that are
+    ALREADY emitting logs (observabilityEnabled=true). Those are exactly the
+    engines already feeding _AllLogs, so nothing new starts being logged and
+    no new bill appears — their rows just stop coming through as `<elided>`.
+    Engines with observability off are listed and skipped.
+
+    Naming engines explicitly = EXPLICIT MODE: force BOTH observabilityEnabled
+    and sensitiveLoggingEnabled on for those engines, i.e. start logging an
+    engine that was not logging before. Use this for a fresh app that has
+    never had observability turned on.
+
+    Auto mode deliberately does not touch every engine in the project: a
+    Gemini Enterprise project routinely holds unrelated search/parser/KB
+    engines, and force-enabling observability on all of them would start
+    billable log volume and write their users' prompts in the clear.
+
+    Individual agents inherit observabilityConfig from their parent engine —
+    there is nothing to set per-agent.
+
+    Ignored entirely when var.enable_sensitive_logging is false.
+  EOT
+  type        = list(string)
+  default     = []
+}
+
 variable "enable_content_classification" {
   description = "Opt-in flag for the ② content-classification pipeline (sql/02_content_classification.sql) run via a one-shot google_bigquery_job. Each apply with this set to true runs an incremental Gemini classification pass over any unclassified prompts, which calls the Gemini endpoint once per row and therefore incurs cost on every apply. Leave false for routine applies; flip to true only when you intentionally want to (re)run the classification batch. For a recurring daily run instead of a one-shot apply-time run, see var.enable_scheduled_classification below."
   type        = bool

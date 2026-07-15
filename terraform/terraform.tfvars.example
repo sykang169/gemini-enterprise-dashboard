@@ -22,6 +22,29 @@ project_id = "your-gcp-project-id"
 # model_name            = "gemini_flash"
 # gemini_endpoint       = "gemini-2.5-flash-lite"  # cheapest verified-working endpoint on this project family
 
+# --- Opt-in: prompt/response text + real user IDs in the logs --------------
+
+# Makes questions, answers, and userIamPrincipal land in the logs as plain
+# text instead of "<elided>". Without it, v_user_questions is empty and every
+# per-user view collapses onto one masked user.
+#
+# *** FORWARD-ONLY: enabling this later does NOT backfill. *** Logs already
+# written masked stay masked forever, so decide BEFORE the first deploy.
+#
+# Defaults to false because it writes end-user PII in the clear into Cloud
+# Logging and, via the linked dataset, into BigQuery. Lock down IAM on both
+# datasets first. See sensitive_logging.tf.
+# enable_sensitive_logging = false
+
+# Which engines to apply the above to.
+#   Empty (default) = AUTO: unmask only engines that are ALREADY logging
+#     (observabilityEnabled=true). Nothing new starts logging; no new bill.
+#     Engines with observability off are listed and skipped.
+#   Explicit list   = force observability + sensitive logging ON for these
+#     engines, i.e. start logging an app that was not logging before. Use for
+#     a fresh app that has never had observability turned on.
+# sensitive_logging_engine_ids = ["my-app_1782188315701"]
+
 # --- Opt-in, cost-incurring flags (both default to false) ------------------
 
 # Runs sql/02_content_classification.sql once per `terraform apply` (Gemini

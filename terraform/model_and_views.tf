@@ -99,6 +99,32 @@ locals {
     ),
     "gemini_ent_dashboard", var.dashboard_dataset_id
   )
+
+  # ---------------------------------------------------------------------------
+  # Job IDs — keyed to the SQL, and BURNED FOREVER once used.
+  # ---------------------------------------------------------------------------
+  # BigQuery never lets a job ID be reused within a project+location, not even
+  # by a job that finished successfully years ago. Deriving the ID from a
+  # sha256 of the SQL is what makes `terraform apply` idempotent (same SQL =
+  # same ID = the job is not re-run), but it has a sharp edge: if state is ever
+  # lost or rebuilt while the SQL is unchanged, Terraform recomputes the very
+  # same ID, tries to create it, and every apply from then on fails with
+  #   Error 409: Already Exists: Job <project>:<location>.<job_id>, duplicate
+  # forever. No retry fixes it; the job must be re-adopted with
+  # `terraform import`. deploy.sh does that automatically (import_job_if_missing).
+  #
+  # Verified 2026-07-15: create_model_gemini_flash_8973b4f855 had succeeded on
+  # 2026-07-10 and the model existed, but the resource was missing from state,
+  # so apply 409'd on attempt after attempt.
+  #
+  # These live as locals ONLY so deploy.sh can ask terraform for the exact ID
+  # (`terraform console <<<'local.create_model_job_id'`) instead of re-deriving
+  # the sha256 in bash. Two implementations of one ID would drift and the
+  # import would silently adopt the wrong job. Single source of truth — do not
+  # inline these back into the resources.
+  create_model_job_id = "create_model_${var.model_name}_${substr(sha256(local.create_model_sql), 0, 10)}"
+  create_views_job_id = "create_dashboard_views_${substr(sha256(local.create_views_sql), 0, 10)}"
+  archive_logs_job_id = "archive_logs_${substr(sha256(local.archive_logs_sql), 0, 10)}"
 }
 
 # ---------------------------------------------------------------------------
@@ -107,7 +133,7 @@ locals {
 resource "google_bigquery_job" "create_model_gemini_flash" {
   project  = var.project_id
   location = var.bq_location
-  job_id   = "create_model_${var.model_name}_${substr(sha256(local.create_model_sql), 0, 10)}"
+  job_id   = local.create_model_job_id
 
   query {
     query              = local.create_model_sql
@@ -131,7 +157,7 @@ resource "google_bigquery_job" "create_model_gemini_flash" {
 resource "google_bigquery_job" "create_dashboard_views" {
   project  = var.project_id
   location = var.bq_location
-  job_id   = "create_dashboard_views_${substr(sha256(local.create_views_sql), 0, 10)}"
+  job_id   = local.create_views_job_id
 
   query {
     query              = local.create_views_sql

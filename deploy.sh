@@ -164,15 +164,72 @@ terraform -chdir="${TF_DIR}" init -reconfigure \
 # 3. Import pre-existing resources so re-runs / partially-provisioned projects
 #    don't die on "409 Already Exists". Each import is best-effort: skipped if
 #    already in state, ignored if the resource doesn't exist yet in the project.
+#
+#    BigQuery jobs are here for a nastier reason than the rest: BigQuery burns a
+#    job ID permanently the moment it is used, even for a job that SUCCEEDED.
+#    job_id is a sha256 of the SQL (see the locals in model_and_views.tf), so if
+#    state is ever lost or rebuilt while the SQL is unchanged, Terraform
+#    recomputes the same ID, tries to create it, and every apply from then on
+#    dies with "409 Already Exists: Job ..., duplicate". That is NOT transient —
+#    the retry loop in step 4 cannot fix it, it just repeats it. Re-adopting the
+#    finished job is the only way out.
+#
+#    Verified 2026-07-15: create_model_gemini_flash_8973b4f855 had succeeded on
+#    2026-07-10 and the model existed, but was absent from state, so apply 409'd
+#    on every attempt until imported.
+#
+#    run_content_classification is deliberately not imported below: its job_id
+#    is timestamp()-based, so it is unique per apply and can never collide.
 # ---------------------------------------------------------------------------
+
+# `terraform import` and `terraform console` must see the SAME variables as the
+# apply, or they disagree with it about what exists: a resource gated by
+# `count = var.enable_* ? 1 : 0` is absent from the config — and therefore
+# un-importable — unless that flag is set, and the flags arrive in EXTRA_ARGS.
+# Passing EXTRA_ARGS wholesale does not work: it also carries -auto-approve,
+# which import/console reject. So forward only the -var bits. (Only the
+# -var="k=v" / -var-file="f" forms are matched, which is what this script's
+# usage documents; the space-separated `-var k=v` form is not.)
+TF_VAR_ARGS=()
+for _arg in ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}; do
+  case "${_arg}" in
+    -var=*|-var-file=*) TF_VAR_ARGS+=("${_arg}") ;;
+  esac
+done
+
 import_if_missing() {
   local addr="$1" id="$2"
   if terraform -chdir="${TF_DIR}" state list 2>/dev/null | grep -qx "${addr}"; then
     return 0  # already tracked
   fi
   echo ">>> import (if it exists): ${addr}"
-  terraform -chdir="${TF_DIR}" import -var="project_id=${PROJECT_ID}" "${addr}" "${id}" \
+  terraform -chdir="${TF_DIR}" import -var="project_id=${PROJECT_ID}" \
+    ${TF_VAR_ARGS[@]+"${TF_VAR_ARGS[@]}"} "${addr}" "${id}" \
     >/dev/null 2>&1 || true
+}
+
+job_id_of() {
+  # Ask terraform for the resource's own job_id rather than re-deriving the
+  # sha256 here — two implementations of one ID would drift, and the import
+  # would then silently adopt the wrong job.
+  terraform -chdir="${TF_DIR}" console -var="project_id=${PROJECT_ID}" \
+    ${TF_VAR_ARGS[@]+"${TF_VAR_ARGS[@]}"} <<<"$1" 2>/dev/null \
+    | tail -n1 | tr -d '"'
+}
+
+import_job_if_missing() {
+  local addr="$1" expr="$2" jid
+  jid="$(job_id_of "${expr}")"
+  # An unresolved expression comes back as "(known after apply)" or empty;
+  # importing that would be nonsense, so skip rather than guess.
+  if [[ -z "${jid}" || "${jid}" == *"("* ]]; then
+    echo ">>> WARNING: could not resolve job_id for ${addr} — skipping its import." >&2
+    echo ">>>          If apply then fails with 409 Already Exists, import it by hand:" >&2
+    echo ">>>            terraform -chdir=${TF_DIR} import ${addr} \\" >&2
+    echo ">>>              projects/${PROJECT_ID}/jobs/<JOB_ID>/location/${BQ_LOCATION}" >&2
+    return 0
+  fi
+  import_if_missing "${addr}" "projects/${PROJECT_ID}/jobs/${jid}/location/${BQ_LOCATION}"
 }
 
 echo ">>> Importing any pre-existing dashboard resources..."
@@ -182,6 +239,12 @@ import_if_missing "google_bigquery_connection.gemini_conn" \
   "projects/${PROJECT_ID}/locations/${BQ_LOCATION,,}/connections/${CONNECTION_ID}"
 import_if_missing "google_logging_linked_dataset.gemini_ent_analytics" \
   "projects/${PROJECT_ID}/locations/global/buckets/${LOG_BUCKET}/links/${ANALYTICS_DATASET_ID}"
+import_job_if_missing "google_bigquery_job.create_model_gemini_flash" "local.create_model_job_id"
+import_job_if_missing "google_bigquery_job.create_dashboard_views" "local.create_views_job_id"
+# count-gated: the [0] address only exists when -var="enable_log_archive=true"
+# is passed, which TF_VAR_ARGS forwards. Without it the import is a harmless
+# no-op, like every other entry here.
+import_job_if_missing "google_bigquery_job.archive_logs[0]" "local.archive_logs_job_id"
 
 # ---------------------------------------------------------------------------
 # 4. terraform apply, with a short retry loop.
@@ -191,20 +254,83 @@ import_if_missing "google_logging_linked_dataset.gemini_ent_analytics" \
 #        "Service account ... does not exist" until it propagates;
 #      - freshly-enabled APIs can briefly still report SERVICE_DISABLED.
 #    Pass -auto-approve for the retries to run unattended.
+#
+#    RETRY ONLY WHAT CAN ACTUALLY SUCCEED ON A RETRY. This loop used to call
+#    every failure "likely a transient propagation error" and sleep 30s three
+#    times. Deterministic failures — a burned job ID, a missing credential, a
+#    denied permission — reproduce identically on every attempt, so the loop
+#    turned a clear one-line error into a 90-second wait that buried the real
+#    cause under two rounds of misleading "likely transient" text. Observed
+#    2026-07-15 with a 409 duplicate job and a 400 missing credential, neither
+#    of which any amount of retrying could fix.
+#
+#    So: capture the output, and bail immediately when it carries a signature
+#    that retrying cannot change. Anything unrecognized is still treated as
+#    transient and retried — the old behavior is the fallback, not the default.
 # ---------------------------------------------------------------------------
 echo ">>> terraform apply -var=\"project_id=${PROJECT_ID}\" ${EXTRA_ARGS[*]}"
 echo ">>> NOTE: includes a 300s (5 min) wait for IAM propagation before the"
 echo ">>>       remote model is created — expect ~7 minutes total for a fresh project."
 
+# Signatures that are pointless to retry, and what to do about each.
+is_permanent_failure() {
+  local out="$1"
+  if grep -q "Already Exists: Job" <<<"${out}"; then
+    echo ">>> This is a BURNED JOB ID, not a transient error. BigQuery keeps a job" >&2
+    echo ">>> id forever once used, so a job that already ran cannot be created" >&2
+    echo ">>> again — retrying will fail identically every time. Terraform lost" >&2
+    echo ">>> track of a job it previously created; re-adopt it:" >&2
+    echo ">>>   terraform -chdir=${TF_DIR} import <ADDRESS> \\" >&2
+    echo ">>>     projects/${PROJECT_ID}/jobs/<JOB_ID>/location/${BQ_LOCATION}" >&2
+    echo ">>> Step 3 of this script does that automatically; if you are seeing" >&2
+    echo ">>> this, its import was skipped — check the WARNING above." >&2
+    return 0
+  fi
+  if grep -q "The field 'version_info' or 'service_account_name' must be specified" <<<"${out}"; then
+    echo ">>> The scheduled query has no runner. BigQuery Data Transfer Service" >&2
+    echo ">>> needs either a service account or an OAuth refresh token, and this" >&2
+    echo ">>> script authenticates with a bare access token that has no refresh" >&2
+    echo ">>> token — so a service account is the only option here. It defaults to" >&2
+    echo ">>> the project's default Compute Engine SA; if that does not exist," >&2
+    echo ">>> name one explicitly:" >&2
+    echo ">>>   $0 ${PROJECT_ID} -var=\"scheduled_query_service_account=SA@${PROJECT_ID}.iam.gserviceaccount.com\"" >&2
+    return 0
+  fi
+  if grep -q "iam.serviceAccounts.actAs" <<<"${out}"; then
+    echo ">>> You lack actAs on the service account the scheduled query runs as." >&2
+    echo ">>> Retrying cannot grant it. Fix with:" >&2
+    echo ">>>   gcloud iam service-accounts add-iam-policy-binding \\" >&2
+    echo ">>>     \"\$(terraform -chdir=${TF_DIR} output -raw scheduled_query_service_account)\" \\" >&2
+    echo ">>>     --member=\"user:\$(gcloud config get-value account)\" \\" >&2
+    echo ">>>     --role=\"roles/iam.serviceAccountUser\"" >&2
+    return 0
+  fi
+  return 1
+}
+
 attempt=1
 max_attempts=3
-until terraform -chdir="${TF_DIR}" apply -var="project_id=${PROJECT_ID}" "${EXTRA_ARGS[@]}"; do
+while true; do
+  # Tee so the user still watches it live; the copy is only for classification.
+  apply_out="$(mktemp)"
+  if terraform -chdir="${TF_DIR}" apply -var="project_id=${PROJECT_ID}" \
+       ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} 2>&1 | tee "${apply_out}"; then
+    rm -f "${apply_out}"
+    break
+  fi
+  out="$(cat "${apply_out}")"; rm -f "${apply_out}"
+
+  if is_permanent_failure "${out}"; then
+    echo "ERROR: terraform apply hit an error that retrying cannot fix (see above)." >&2
+    exit 1
+  fi
   if (( attempt >= max_attempts )); then
     echo "ERROR: terraform apply still failing after ${max_attempts} attempts." >&2
     exit 1
   fi
-  echo ">>> apply failed (attempt ${attempt}/${max_attempts}) — likely a transient" >&2
-  echo ">>> propagation/eventual-consistency error. Waiting 30s and retrying..." >&2
+  echo ">>> apply failed (attempt ${attempt}/${max_attempts}) — no known-permanent" >&2
+  echo ">>> signature, so this may be a transient propagation/eventual-consistency" >&2
+  echo ">>> error. Waiting 30s and retrying..." >&2
   sleep 30
   attempt=$(( attempt + 1 ))
 done

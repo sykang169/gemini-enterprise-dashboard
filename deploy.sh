@@ -54,6 +54,12 @@ LOG_BUCKET="${LOG_BUCKET:-_Default}"
 #    server intermittently returns an empty body ->
 #      "oauth2/google: invalid token JSON from metadata: EOF"
 #    Handing the provider one static token up front sidesteps that entirely.
+#
+#    This ALSO authenticates the GCS state backend (step 2). The backend does
+#    not share the provider's credentials — without this variable it falls back
+#    to Application Default Credentials and `terraform init` can die on
+#    `oauth2: "invalid_grant" "reauth related error (invalid_rapt)"` even though
+#    gcloud itself is perfectly happy. Keep this export BEFORE init.
 # ---------------------------------------------------------------------------
 if ! command -v gcloud >/dev/null 2>&1; then
   echo "ERROR: gcloud not found on PATH. Run this in Cloud Shell or install the gcloud CLI." >&2
@@ -90,18 +96,69 @@ if [[ "${billing_enabled}" != "True" ]]; then
 fi
 echo ">>> billing: enabled"
 
-# 1b. Bootstrap the two APIs Terraform itself needs to enable everything else.
+# 1b. Bootstrap the APIs Terraform itself needs to enable everything else.
 #     Without these, google_project_service fails with SERVICE_DISABLED on the
-#     serviceusage endpoint (chicken-and-egg). Idempotent; ~instant if already on.
-echo ">>> Ensuring serviceusage + cloudresourcemanager APIs are enabled..."
+#     serviceusage endpoint (chicken-and-egg). storage is here rather than in
+#     apis.tf for the same reason: the state bucket must exist before Terraform
+#     runs at all, so Terraform cannot be what enables the API that creates it.
+#     Idempotent; ~instant if already on.
+echo ">>> Ensuring serviceusage + cloudresourcemanager + storage APIs are enabled..."
 gcloud services enable serviceusage.googleapis.com cloudresourcemanager.googleapis.com \
-  --project="${PROJECT_ID}"
+  storage.googleapis.com --project="${PROJECT_ID}"
 
 # ---------------------------------------------------------------------------
-# 2. terraform init
+# 2. Remote state bucket + terraform init.
 # ---------------------------------------------------------------------------
-echo ">>> terraform -chdir=${TF_DIR} init"
-terraform -chdir="${TF_DIR}" init
+# State lives in GCS, not on this machine, so that deploying the same project
+# from a different PC applies only what changed instead of trying to recreate
+# everything (and dying on "Already Exists" for the BigQuery jobs, whose ids
+# are a sha256 of their SQL and are unique per project forever). See
+# terraform/backend.tf.
+#
+# Terraform can't create the bucket holding its own state, so it is created
+# here, before init. Versioning is on deliberately: state is the one file whose
+# loss means re-importing every resource by hand.
+STATE_BUCKET="${STATE_BUCKET:-${PROJECT_ID}-tfstate}"
+STATE_PREFIX="${STATE_PREFIX:-gemini-ent-dashboard}"
+
+if gcloud storage buckets describe "gs://${STATE_BUCKET}" --project="${PROJECT_ID}" >/dev/null 2>&1; then
+  echo ">>> Terraform state bucket: gs://${STATE_BUCKET} (exists)"
+else
+  echo ">>> Creating Terraform state bucket gs://${STATE_BUCKET} ..."
+  # --uniform-bucket-level-access: state is not per-object ACL material.
+  # --public-access-prevention: state can embed resource metadata; never public.
+  if ! gcloud storage buckets create "gs://${STATE_BUCKET}" \
+       --project="${PROJECT_ID}" \
+       --location="${BQ_LOCATION}" \
+       --uniform-bucket-level-access \
+       --public-access-prevention 2>&1; then
+    echo "ERROR: could not create the state bucket gs://${STATE_BUCKET}." >&2
+    echo "       GCS bucket names are GLOBALLY unique — if the name is taken by" >&2
+    echo "       another organization, pick your own and re-run:" >&2
+    echo "         STATE_BUCKET=my-unique-tfstate $0 ${PROJECT_ID}" >&2
+    exit 1
+  fi
+  gcloud storage buckets update "gs://${STATE_BUCKET}" --versioning --project="${PROJECT_ID}"
+fi
+
+echo ">>> terraform -chdir=${TF_DIR} init (backend: gs://${STATE_BUCKET}/${STATE_PREFIX})"
+# -reconfigure keeps init non-interactive when the backend settings are already
+# recorded. It does NOT migrate a pre-existing LOCAL state — that is a one-time
+# manual step, on purpose, because silently discarding a local state would lose
+# the only record of the BigQuery jobs and strand the next deploy on a 409:
+#   terraform -chdir=terraform init -migrate-state \
+#     -backend-config="bucket=${STATE_BUCKET}" -backend-config="prefix=${STATE_PREFIX}"
+if [[ -f "${TF_DIR}/terraform.tfstate" ]]; then
+  echo ">>> WARNING: a local terraform.tfstate exists in ${TF_DIR}." >&2
+  echo ">>>          It is NOT migrated automatically. If it describes this" >&2
+  echo ">>>          project, migrate it once before deploying again:" >&2
+  echo ">>>            terraform -chdir=terraform init -migrate-state \\" >&2
+  echo ">>>              -backend-config=\"bucket=${STATE_BUCKET}\" \\" >&2
+  echo ">>>              -backend-config=\"prefix=${STATE_PREFIX}\"" >&2
+fi
+terraform -chdir="${TF_DIR}" init -reconfigure \
+  -backend-config="bucket=${STATE_BUCKET}" \
+  -backend-config="prefix=${STATE_PREFIX}"
 
 # ---------------------------------------------------------------------------
 # 3. Import pre-existing resources so re-runs / partially-provisioned projects

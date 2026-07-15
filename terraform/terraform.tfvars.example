@@ -45,6 +45,12 @@ project_id = "your-gcp-project-id"
 #     a fresh app that has never had observability turned on.
 # sensitive_logging_engine_ids = ["my-app_1782188315701"]
 
+# How far back the CHART views read from the archive. Default 90 days.
+# The archive keeps everything regardless — this only bounds what charts scan,
+# so their cost stays flat instead of growing as the archive ages. Use
+# v_log_source_all for ad-hoc queries that need older history. 0 = unbounded.
+# dashboard_window_days = 90
+
 # --- Opt-in: durable log archive -------------------------------------------
 
 # _AllLogs is a VIEW over the _Default log bucket (0 bytes of its own), so the

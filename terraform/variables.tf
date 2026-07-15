@@ -166,6 +166,39 @@ variable "sensitive_logging_engine_ids" {
   default     = []
 }
 
+variable "dashboard_window_days" {
+  description = <<-EOT
+    How many days back the dashboard views (v_log_source, and therefore every
+    v_* chart view) read from the archive. Default 90.
+
+    WHY A BOUND EXISTS: t_logs_archive is append-only forever, so without one
+    every chart's scan grows for the life of the deployment — a 3-year-old
+    install would scan 3 years of logs to draw "queries per day" on every
+    refresh. The bound keeps chart cost flat instead of growing with age.
+
+    This does NOT shrink the archive or drop history. The table keeps
+    everything; v_log_source_all reads it unbounded for ad-hoc/compliance
+    queries. This only bounds what the charts reach for by default.
+
+    A Looker report with a date-range control already prunes on its own
+    (verified: filtering the aggregate views' `day` column still prunes
+    partitions). This default is the safety net for a chart placed on a page
+    with no date control, which sends no filter at all.
+
+    Sized against retention: the log bucket keeps 30 days, so 90 still shows
+    3x what the logs alone could. Set 0 for unbounded (charts then scan the
+    full archive — only sensible if you deliberately want multi-year trends on
+    the dashboard).
+  EOT
+  type        = number
+  default     = 90
+
+  validation {
+    condition     = var.dashboard_window_days >= 0
+    error_message = "dashboard_window_days must be 0 (unbounded) or a positive number of days."
+  }
+}
+
 variable "enable_log_archive" {
   description = <<-EOT
     Opt-in flag for the ③ log archive (sql/03_archive_logs.sql, archive.tf):

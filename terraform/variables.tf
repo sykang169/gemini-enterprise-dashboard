@@ -166,6 +166,64 @@ variable "sensitive_logging_engine_ids" {
   default     = []
 }
 
+variable "enable_log_archive" {
+  description = <<-EOT
+    Opt-in flag for the ③ log archive (sql/03_archive_logs.sql, archive.tf):
+    a real partitioned table (t_logs_archive) holding a durable copy of the
+    logs the dashboard reads, with the same schema as _AllLogs.
+
+    WHY YOU LIKELY WANT THIS: _AllLogs is a VIEW over the _Default log bucket
+    and stores nothing itself, so the bucket's retention (30 days by default)
+    is the hard limit on how far back ANY view can see. Expired logs are gone
+    — there is no backfill. This table is the only thing that outlives it.
+
+    Cost is negligible: the script archives only the logs the views read
+    (~11 MB per 38 days on the source project, vs 20.6 GB unfiltered). It is
+    opt-in for governance, not cost — with var.enable_sensitive_logging on,
+    the archived rows contain end-user prompts and identities in the clear,
+    so this makes that PII outlive the log bucket's retention policy.
+
+    START IT EARLY: the archive can only save what the bucket still holds.
+    Enabling it after retention has already expired does not bring data back.
+
+    This one-shot job creates + backfills the table; pair it with
+    var.enable_scheduled_archive to keep it current.
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "enable_scheduled_archive" {
+  description = <<-EOT
+    Opt-in flag for the daily incremental archive run (a BigQuery Data
+    Transfer Service scheduled query, see archive.tf). Without this, the
+    archive is a one-time snapshot that starts going stale immediately.
+
+    Safe to run repeatedly: it calls no Gemini endpoint (unlike
+    var.enable_scheduled_classification), and the MERGE key
+    (log_name, timestamp, insert_id) makes re-running over an already-archived
+    window a no-op. Per-run cost is just scanning the lookback window.
+
+    Requires bigquerydatatransfer.googleapis.com (enabled by apis.tf).
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "archive_schedule" {
+  description = <<-EOT
+    BigQuery Data Transfer Service schedule for the daily log archive
+    (archive.tf). Default "every day 17:00".
+
+    Evaluated in UTC — the API has no timezone parameter. "every day 17:00" =
+    17:00 UTC = 02:00 KST (next day), deliberately one hour ahead of the
+    default content-classification schedule (var.scheduled_query_schedule,
+    18:00 UTC) so a day's logs are archived before the classifier reads them.
+  EOT
+  type        = string
+  default     = "every day 17:00"
+}
+
 variable "enable_content_classification" {
   description = "Opt-in flag for the ② content-classification pipeline (sql/02_content_classification.sql) run via a one-shot google_bigquery_job. Each apply with this set to true runs an incremental Gemini classification pass over any unclassified prompts, which calls the Gemini endpoint once per row and therefore incurs cost on every apply. Leave false for routine applies; flip to true only when you intentionally want to (re)run the classification batch. For a recurring daily run instead of a one-shot apply-time run, see var.enable_scheduled_classification below."
   type        = bool

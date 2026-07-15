@@ -63,6 +63,19 @@ git clone https://github.com/sykang169/gemini-enterprise-dashboard.git && cd gem
 
 **핵심: 로그를 BigQuery로 스트리밍/복사하지 않습니다.** Log Analytics 연합 조회라 뷰는 항상 최신이고 로그 저장비가 없습니다. (콘텐츠 분류 테이블만 예약 쿼리로 배치 갱신)
 
+> ### 📦 로그 보관 한계와 아카이브 (`enable_log_archive`)
+>
+> 위 구조의 대가가 하나 있습니다. `_AllLogs`는 로그 버킷을 보는 **뷰**라 자체 저장량이 0바이트입니다(`numBytes=0`으로 확인 가능). 즉 **로그 버킷의 리텐션이 곧 대시보드의 기억 한계**이고, 기본 30일이면 모든 뷰가 30일 롤링 윈도우가 됩니다. 만료된 로그는 **백필이 없어 영구 소실**입니다.
+>
+> ```bash
+> ./deploy.sh <YOUR_PROJECT_ID> \
+>   -var="enable_log_archive=true" -var="enable_scheduled_archive=true"
+> ```
+>
+> 뷰가 실제로 읽는 로그만 골라 `t_logs_archive`(파티션 테이블)에 증분 복사합니다. **38일 기준 20.6GB → 11MB** — 저장비는 반올림하면 0입니다. 매일 02:00 KST 증분 실행하며, 중복키 `(log_name, timestamp, insert_id)` MERGE라 재실행해도 안전합니다.
+>
+> **반드시 미리 켜세요.** 아카이브는 버킷에 아직 남아 있는 것만 저장할 수 있어, 리텐션이 지난 뒤 켜면 그 데이터는 돌아오지 않습니다.
+
 ---
 
 ## 대시보드 지표 (23개 뷰)

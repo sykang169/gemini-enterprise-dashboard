@@ -8,10 +8,17 @@
 ## 🚀 원큐 배포 (TL;DR)
 
 **신규/빈 프로젝트에서도** 아래 명령 **1개**로 전체 구성(API 활성화 → 데이터셋 → Log Analytics
-연동 → 커넥션/IAM → 원격 모델 → 20개 뷰 → Looker Studio URL)이 끝까지 완료됩니다.
+연동 → 커넥션/IAM → 원격 모델 → 22개 뷰 → Looker Studio URL)이 끝까지 완료됩니다.
+state는 로컬이 아니라 `gs://<PROJECT_ID>-tfstate`에 저장되므로(`backend.tf`) 다른 PC에서
+같은 프로젝트에 재배포해도 변경분만 반영됩니다.
 
 ```bash
 ./deploy.sh <YOUR_PROJECT_ID>
+
+# 질문·응답 원문 + 영구 보관까지 (권장 — 둘 다 소급 불가, 배포 전에 결정)
+./deploy.sh <YOUR_PROJECT_ID> \
+  -var="enable_sensitive_logging=true" \
+  -var="enable_log_archive=true" -var="enable_scheduled_archive=true"
 ```
 
 - **사전조건**: 대상 프로젝트에 **결제(billing) 활성화** + 실행 계정에 **프로젝트 소유자(Owner)
@@ -22,24 +29,31 @@
 - **다른 프로젝트에 배포할 때도 `project_id`만 바꾸면 됩니다** — `sql/01_create_views.sql` /
   `sql/02_content_classification.sql`에 하드코딩된 프로젝트 ID·데이터셋 이름은 Terraform이
   `model_and_views.tf`의 `replace()`로, 노트북은 `load_sql()` 헬퍼로 자동 치환해 주입합니다.
-- 이 저장소를 작성하는 동안에는 위 명령을 실제로 실행하지 않았습니다 — 문법 검증(`terraform fmt
-  -check`, `bash -n`)만 수행했습니다.
+- **두 플래그는 소급이 안 됩니다**: `enable_sensitive_logging`을 안 켜면 질문·응답·사용자ID가
+  `<elided>`로 굳고, `enable_log_archive`를 안 켜면 로그 버킷 리텐션(기본 30일)이 지난 데이터가
+  사라집니다. 둘 다 **켠 시점 이후**에만 효력이 있으니 배포 전에 결정하세요.
 
 ## 산출물 지도
 
 ```
 sql/
-  01_create_views.sql          # 20개 v_* 뷰 정의 (bq show --view 로 라이브 환경에서 추출·통합)
-  02_content_classification.sql # ② 콘텐츠 분류 (기존 파일, 미변경 — 옵트인/비용 유발)
+  01_create_views.sql          # 22개 뷰: 지표 뷰 20개 + v_log_source(차트용, 90일 윈도우)
+                               #          + v_log_source_all(ad-hoc, 무제한). t_logs_archive 도 여기서 생성
+  02_content_classification.sql # ② 콘텐츠 분류 (옵트인/비용 유발)
+  03_archive_logs.sql          # ③ 로그 아카이브 — _AllLogs → t_logs_archive 증분 MERGE (옵트인)
 
 terraform/
   providers.tf                 # google(~> 6.0) + time(~> 0.11) provider 핀
-  apis.tf                      # google_project_service (5개 API 자동 활성화) — 원큐 배포 핵심
+  backend.tf                   # GCS 원격 state (빈 블록 — 값은 deploy.sh가 init 시 주입)
+  apis.tf                      # google_project_service (6개 API 자동 활성화) — 원큐 배포 핵심
   variables.tf                 # project_id(필수, 기본값 없음) 외 전부 기본값 있음, 옵트인 플래그·스케줄
   datasets.tf                  # google_bigquery_dataset.gemini_ent_dashboard
   logging.tf                   # Log Analytics 활성화(null_resource) + google_logging_linked_dataset
   connection.tf                # google_bigquery_connection.gemini_conn + IAM(aiplatform.user)
   model_and_views.tf           # time_sleep(IAM 전파 대기) + google_bigquery_job x3 (모델 DDL/뷰/옵트인 분류)
+                               # + DASHBOARD_WINDOW_DAYS 치환
+  sensitive_logging.tf         # 옵트인: 엔진 observabilityConfig PATCH (원문·사용자ID 마스킹 해제)
+  archive.tf                   # 옵트인: t_logs_archive 생성·백필 + 매시간 증분 예약 쿼리
   scheduled_query.tf           # google_bigquery_data_transfer_config (옵트인, 콘텐츠 분류 스케줄 자동 실행)
   outputs.tf                   # 데이터셋/커넥션 id, 모델 엔드포인트, 예약 쿼리 id, Looker Studio 실행 URL
   terraform.tfvars.example     # project_id만 채우면 되는 최소 예시
@@ -69,6 +83,11 @@ deploy.sh                      # 루트: init+apply+Looker Studio URL 출력 원
 
 ```bash
 ./deploy.sh <YOUR_PROJECT_ID>
+
+# 질문·응답 원문 + 영구 보관까지 (권장 — 둘 다 소급 불가, 배포 전에 결정)
+./deploy.sh <YOUR_PROJECT_ID> \
+  -var="enable_sensitive_logging=true" \
+  -var="enable_log_archive=true" -var="enable_scheduled_archive=true"
 ```
 
 또는 Terraform을 직접:
@@ -173,13 +192,20 @@ API는 더 이상 수동으로 미리 활성화할 필요가 없습니다 — `t
 8. **뷰 SQL은 라이브 환경에서 추출한 것**입니다 (`bq show --view --format=prettyjson`). 향후 콘솔에서
    뷰를 직접 수정하면 `sql/01_create_views.sql`과 실제 정의가 어긋날 수 있으니, 변경은 이 파일을
    고치고 Terraform/노트북으로 재적용하는 방식으로 관리하는 것을 권장합니다. `sql/01_create_views.sql`
-   / `sql/02_content_classification.sql`은 원본 프로젝트(`YOUR_PROJECT_ID`)와 기본
-   데이터셋 이름이 그대로 하드코딩되어 있어(단독으로 콘솔/`bq query`에서 실행 가능하도록 의도적으로
-   유지) **다른 프로젝트에 배포할 때는 그대로 두면 깨집니다** — Terraform은 `model_and_views.tf`의
-   중첩 `replace()`로, 노트북은 `load_sql()` 헬퍼로 apply/실행 시점에 `var.project_id`/`PROJECT_ID`
-   (및 데이터셋 변수, Terraform 한정)로 자동 치환하므로 SQL 파일 자체를 고칠 필요는 없습니다.
+   / `sql/02_content_classification.sql` / `sql/03_archive_logs.sql`은 원본 프로젝트
+   (`YOUR_PROJECT_ID`)와 기본 데이터셋 이름이 그대로 하드코딩되어 있어 **다른 프로젝트에 배포할 때
+   그대로 두면 깨집니다** — Terraform은 `model_and_views.tf`의 중첩 `replace()`로, 노트북은
+   `load_sql()` 헬퍼로 apply/실행 시점에 `var.project_id`/`PROJECT_ID`(및 데이터셋 변수, Terraform
+   한정)로 자동 치환하므로 SQL 파일 자체를 고칠 필요는 없습니다.
+   **단 `sql/01_create_views.sql`은 `bq query < sql/01_create_views.sql` 식의 단독 실행이
+   불가능합니다** — `v_log_source`에 `INTERVAL DASHBOARD_WINDOW_DAYS DAY` 토큰이 있어 그대로는
+   파싱되지 않습니다(`Unrecognized name: DASHBOARD_WINDOW_DAYS`). 토큰은 Terraform이
+   `var.dashboard_window_days`로, 노트북이 `DASHBOARD_WINDOW_DAYS` 상수로 렌더합니다(둘의 렌더
+   결과가 바이트 단위로 동일함을 확인). 손으로 실행하려면 프로젝트 id와 함께 이 절도 치환하세요:
+   `sed -e 's/YOUR_PROJECT_ID/<PROJ>/g' -e 's/INTERVAL DASHBOARD_WINDOW_DAYS DAY/INTERVAL 90 DAY/' sql/01_create_views.sql | bq query --use_legacy_sql=false`
+   `sql/02`·`sql/03`은 프로젝트 id만 치환하면 단독 실행됩니다.
 9. **API 자동 활성화 (원큐 배포 핵심)**: `terraform/apis.tf`의 `google_project_service.apis`가
-   apply 시작 시점에 5개 API를 전부 활성화하고, 다른 모든 리소스가 `depends_on`으로 이를 기다립니다.
+   apply 시작 시점에 6개 API를 전부 활성화하고, 다른 모든 리소스가 `depends_on`으로 이를 기다립니다.
    `disable_on_destroy = false`라서 `terraform destroy`가 API를 비활성화하지 않습니다(공유 프로젝트에서
    안전하게).
 10. **IAM 전파 대기 (원큐 배포 신뢰성 핵심)**: 실측 결과, 커넥션 서비스 계정에
@@ -191,7 +217,7 @@ API는 더 이상 수동으로 미리 활성화할 필요가 없습니다 — `t
 
 ## 검증 상태
 
-- `sql/01_create_views.sql`: 20개 뷰 전부 `bq show --view --format=prettyjson`으로 추출, 대상 프로젝트/데이터셋
+- `sql/01_create_views.sql`: 지표 뷰 20개는 `bq show --view --format=prettyjson`으로 라이브에서 추출, 대상 프로젝트/데이터셋
   일치 확인.
 - `terraform/*.tf`: `terraform fmt -check -diff -recursive` 통과 (문법/스타일 정상, `apis.tf`/`scheduled_query.tf`/
   `outputs.tf`의 `for`/`flatten` 표현식, `model_and_views.tf`의 중첩 `replace()` 표현식 포함).

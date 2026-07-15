@@ -25,7 +25,33 @@ git clone https://github.com/sykang169/gemini-enterprise-dashboard.git && cd gem
 #    - 이후 자동: 그 리포트를 템플릿으로 등록하면 URL 하나로 완성형 대시보드 복제
 ```
 
-`deploy.sh`가 하는 일: 결제/인증 preflight → 필요한 API 활성화 → BigQuery 데이터셋 → Log Analytics 링크 → BQ↔Gemini 연결·IAM → (IAM 전파 5분 대기 내장) → Gemini 원격 모델 → 대시보드 뷰 23개 → (옵션) 콘텐츠 분류·예약 쿼리 → **Looker Studio 구성 안내(또는 템플릿 지정 시 완성형 대시보드 복제 URL) 출력**.
+`deploy.sh`가 하는 일: 결제/인증 preflight → 필요한 API 활성화 → **원격 state 버킷 생성 + init** → BigQuery 데이터셋 → Log Analytics 링크 → BQ↔Gemini 연결·IAM → (IAM 전파 5분 대기 내장) → Gemini 원격 모델 → 대시보드 뷰 23개 → (옵션) 콘텐츠 분류·예약 쿼리 → **Looker Studio 구성 안내(또는 템플릿 지정 시 완성형 대시보드 복제 URL) 출력**.
+
+> ### 🗄️ Terraform state는 GCS에 있습니다 (다른 PC에서 배포해도 안전)
+>
+> state는 `gs://<PROJECT_ID>-tfstate`(버전관리 켜짐)에 저장되며 `deploy.sh`가 없으면 만들어줍니다. 로컬 파일이 아니라서 **어느 PC에서 배포하든 같은 state를 읽고 변경분만 반영**합니다.
+>
+> 이게 중요한 이유: BigQuery job의 `job_id`는 실행할 SQL의 sha256이고 **프로젝트+위치당 영구히 유일**합니다. state가 없는 PC에서 같은 프로젝트에 재배포하면 Terraform이 그 job을 다시 만들려다 `Already Exists: Job ...`로 **apply가 중단**됩니다(자원이 재생성되는 게 아니라 그냥 멈춥니다). 원격 state가 이 문제를 근본적으로 없앱니다.
+>
+> **버킷 이름은 전역 유일**이라 충돌하면 직접 지정하세요: `STATE_BUCKET=my-unique-tfstate ./deploy.sh <PROJECT_ID>`
+>
+> **이미 로컬 state로 배포한 적이 있다면**, state를 가진 그 PC에서 **한 번만** 마이그레이션하세요. 안 하면 그 PC만 알던 BigQuery job 정보가 사라져 다음 배포가 위 409에 걸립니다:
+>
+> ```bash
+> terraform -chdir=terraform init -migrate-state \
+>   -backend-config="bucket=<PROJECT_ID>-tfstate" \
+>   -backend-config="prefix=gemini-ent-dashboard"
+> ```
+>
+> **그 state가 이미 사라졌다면** job을 한 번 수동 import하면 됩니다:
+>
+> ```bash
+> P=<PROJECT_ID>
+> JOB=$(bq ls -j --max_results=1000 --format=json $P \
+>   | python3 -c 'import sys,json;print(next(j["jobReference"]["jobId"] for j in json.load(sys.stdin) if j["jobReference"]["jobId"].startswith("create_model_gemini_flash")))')
+> terraform -chdir=terraform import -var="project_id=$P" \
+>   google_bigquery_job.create_model_gemini_flash "projects/$P/jobs/$JOB/location/US"
+> ```
 
 > **Looker Studio 자동 생성:** Looker Studio는 차트를 코드로 맨바닥에서 만드는 API가 없어, 완성형 대시보드는 **템플릿 리포트 복제** 방식으로 자동화합니다. `looker_studio_setup.md` 섹션 0을 따라 한 번 템플릿을 만들고 `-var="looker_studio_template_report_id=<REPORT_ID>"`로 배포하면, 이후 어떤 프로젝트든 완성형 대시보드를 한 URL로 복제 생성합니다.
 

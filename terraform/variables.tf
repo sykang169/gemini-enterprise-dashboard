@@ -312,7 +312,26 @@ variable "scheduled_query_schedule" {
 }
 
 variable "scheduled_query_service_account" {
-  description = "Service account email the scheduled query (google_bigquery_data_transfer_config) runs as. Empty string means BigQuery Data Transfer Service uses its own default credentials/behavior instead of impersonating a specific service account. The already-existing manual config in this project runs under the default Compute Engine service account."
+  description = <<-EOT
+    Service account email the scheduled queries (archive.tf, scheduled_query.tf)
+    run as.
+
+    Empty string (default) means the project's DEFAULT COMPUTE ENGINE service
+    account, resolved at plan time as
+    "<project-number>-compute@developer.gserviceaccount.com" from
+    data.google_project — not hardcoded, so this works in any project.
+
+    Empty does NOT mean "let Data Transfer Service decide": DTS has no default
+    runner, and creating a transfer config without one fails with
+    "Error 400: Failed to find a valid credential. The field 'version_info' or
+    'service_account_name' must be specified." See the header comment in
+    scheduled_query.tf.
+
+    Whoever runs terraform needs iam.serviceAccounts.actAs on this SA, and the
+    SA needs BigQuery Data Editor on the datasets plus Vertex AI User for the
+    Gemini calls in sql/02. Set this explicitly if the default compute SA does
+    not exist (Compute Engine API never enabled) or lacks those roles.
+  EOT
   type        = string
   default     = ""
 }

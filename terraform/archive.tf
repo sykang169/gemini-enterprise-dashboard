@@ -47,7 +47,7 @@ resource "google_bigquery_job" "archive_logs" {
 
   project  = var.project_id
   location = var.bq_location
-  job_id   = "archive_logs_${substr(sha256(local.archive_logs_sql), 0, 10)}"
+  job_id   = local.archive_logs_job_id
 
   query {
     query              = local.archive_logs_sql
@@ -87,7 +87,10 @@ resource "google_bigquery_data_transfer_config" "daily_log_archive" {
   # there is no timezone parameter. Convert your local time yourself.
   schedule = var.archive_schedule
 
-  service_account_name = var.scheduled_query_service_account != "" ? var.scheduled_query_service_account : null
+  # Defaults to the project's default Compute Engine SA. local.scheduled_query_sa
+  # and the reasoning behind it live in scheduled_query.tf — a transfer config
+  # with no runner is a hard 400, not a default.
+  service_account_name = local.scheduled_query_sa
 
   # Reuses local.archive_logs_sql (model_and_views.tf) rather than a bare
   # file() call, so the project/dataset placeholders inside sql/03 are

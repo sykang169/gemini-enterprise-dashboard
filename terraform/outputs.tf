@@ -32,6 +32,11 @@ output "remote_model_endpoint" {
   value       = var.gemini_endpoint
 }
 
+output "scheduled_query_service_account" {
+  description = "Service account the scheduled queries (archive.tf, scheduled_query.tf) run as — the project's default Compute Engine SA unless var.scheduled_query_service_account overrides it. Whoever runs terraform needs iam.serviceAccounts.actAs on it; see scheduled_query.tf for the grant command."
+  value       = local.scheduled_query_sa
+}
+
 output "scheduled_classification_transfer_config_id" {
   description = "Resource id of the Terraform-managed daily content-classification scheduled query, if var.enable_scheduled_classification is true. NOTE: a manually-created equivalent (projects/YOUR_PROJECT_NUMBER/locations/us/transferConfigs/YOUR_TRANSFER_CONFIG_ID) already runs in the live project — see scheduled_query.tf before enabling this to avoid a duplicate schedule."
   value       = try(google_bigquery_data_transfer_config.daily_content_classification[0].id, null)

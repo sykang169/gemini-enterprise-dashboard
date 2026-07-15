@@ -50,34 +50,38 @@ AS SELECT * FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs` WHERE FALSE
 ;
 
 CREATE OR REPLACE VIEW `YOUR_PROJECT_ID.gemini_ent_dashboard.v_log_source` AS
+-- ARCHIVE-ONLY, AND THAT IS THE WHOLE POINT.
+-- This used to UNION the archive with _AllLogs so charts were real-time. That
+-- cost far more than it looked. _AllLogs is partitioned by day only -- there is
+-- no way to prune it by log_name -- so ANY read of it drags in every unrelated
+-- log in the window (Cloud Run, agents, GCE...), which is 73% of the bucket,
+-- and reads their json_payload column in full. Measured on the live dataset:
+--
+--   SELECT * FROM t_logs_archive .......... 2.32 MB
+--   SELECT * FROM v_log_source (w/ UNION) . 5,930 MB      <- 2,556x more
+--
+-- A 20-chart Looker dashboard re-queries every view on load, so that union was
+-- ~118 GB (~$0.59) PER PAGE LOAD, and it scales with total log volume rather
+-- than with the dashboard's own data. Reading only the archive -- which is
+-- pre-filtered to the logs the views need, partitioned by day and clustered by
+-- log_name -- makes the same page load ~46 MB, and keeps it roughly flat as the
+-- project's logging grows.
+--
+-- THE TRADE-OFF: the dashboard is now as fresh as the last archive run, not
+-- real-time. sql/03 runs hourly (var.archive_schedule), so worst case is ~1
+-- hour behind. Every metric here is a daily aggregate, so an hour of lag does
+-- not change what anyone reads off the charts.
+--
+-- If the archive stops running the dashboard goes stale rather than wrong: it
+-- keeps showing everything up to the last successful run. Nothing is lost --
+-- the logs sit in the bucket until retention expires and the next successful
+-- run backfills them (see the watermark logic in sql/03). Monitor the
+-- "Gemini Ent - Daily Log Archive" scheduled query.
+--
+-- The indirection is kept even though it is now a plain passthrough: the 20
+-- views below read v_log_source, so the source can change again without
+-- touching any of them.
 SELECT * FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.t_logs_archive`
-UNION ALL
-SELECT * FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs`
--- The COALESCE is load-bearing, not defensive padding. On an empty archive
--- MAX(timestamp) is NULL, and `timestamp > NULL` evaluates to NULL, which
--- filters out EVERY row. Without the fallback a deploy with archiving off
--- (the default) would hand every view an empty table and blank the whole
--- dashboard. Verified against the live dataset.
-WHERE timestamp > (
-  SELECT COALESCE(MAX(timestamp), TIMESTAMP("1970-01-01"))
-  FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.t_logs_archive`
-)
--- KEEP THIS FILTER IN SYNC WITH sql/03_archive_logs.sql. Both halves of the
--- UNION must carry the same rows, or a metric would jump the moment a row
--- crossed the watermark from the live side to the archived side.
-AND (
-  log_name LIKE '%gemini_enterprise_user_activity'
-  OR log_name LIKE '%gen_ai.user.message'
-  OR log_name LIKE '%gen_ai.choice'
-  OR log_name LIKE '%api_errors'
-  -- Model Armor: real end-user prompts only. client_name=VERTEX_AI rows are
-  -- this dashboard's own ML.GENERATE_TEXT classification traffic caught by
-  -- the project-wide floor setting -- 99.93% of MA volume.
-  OR (
-    log_name LIKE '%sanitize_operations'
-    AND JSON_VALUE(labels,'$."modelarmor.googleapis.com/client_name"') LIKE 'GEMINI_ENTERPRISE%'
-  )
-)
 ;
 
 -- ---------------------------------------------------------------------

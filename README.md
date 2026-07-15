@@ -77,17 +77,26 @@ git clone https://github.com/sykang169/gemini-enterprise-dashboard.git && cd gem
 [Gemini Enterprise / Model Armor]
         │  Cloud Logging 실시간 자동 수집
         ▼
-[_Default 로그 버킷 (Log Analytics 켜짐, 90일 보관)]
-        │  federated (복사 없음, BigQuery 저장비 0)
+[_Default 로그 버킷]  ← 로그의 실체는 여기에만. 리텐션이 곧 수명(기본 30일)
+        │  Log Analytics — federated VIEW (numBytes=0, 사본 아님)
         ▼
-[gemini_ent_analytics._AllLogs]  ── SQL 뷰 23개 ──▶ [Looker Studio (무료)]
+[gemini_ent_analytics._AllLogs]
+        │  매시간 증분 MERGE (sql/03) — 뷰가 읽는 로그만, 중복키로 멱등
+        ▼
+[t_logs_archive]  ← 영구 보관. 일 파티션 + log_name 클러스터
         │
-        └─ (옵션) Model Armor 프롬프트 원문
+        ├─ v_log_source ── SQL 뷰 23개 ──▶ [Looker Studio (무료)]
+        │
+        └─ (옵션) 질문 원문
              └─ BigQuery + Gemini(gemini-2.5-flash-lite) 분류
                   └─ 토픽/의도/감성 뷰  ← 매일 03:00 KST 예약 쿼리로 갱신
 ```
 
-**핵심: 로그를 BigQuery로 스트리밍/복사하지 않습니다.** Log Analytics 연합 조회라 뷰는 항상 최신이고 로그 저장비가 없습니다. (콘텐츠 분류 테이블만 예약 쿼리로 배치 갱신)
+**핵심 두 가지.**
+
+**로그를 BigQuery로 스트리밍하지 않습니다.** `_AllLogs`는 로그 버킷을 보는 연합 뷰라 저장비가 0입니다. 대신 **버킷 리텐션이 곧 대시보드의 기억 한계**라, 그걸 넘기려면 아래 아카이브가 필요합니다.
+
+**뷰는 `_AllLogs`가 아니라 아카이브를 읽습니다.** `_AllLogs`는 날짜로만 파티션돼 `log_name` 프루닝이 안 되므로, 한 번 읽으면 그 기간의 무관한 로그(전체의 73%)까지 통째로 스캔합니다 — 차트 1회 조회에 **7.5GB**. 아카이브는 필요한 로그만 담고 파티션·클러스터가 걸려 있어 같은 조회가 **1.28MB**입니다. 대가는 **최대 1시간 지연**이고, 모든 지표가 일별 집계라 실제로 읽히는 값은 달라지지 않습니다.
 
 > ### 📦 로그 보관 한계와 아카이브 (`enable_log_archive`)
 >
@@ -98,7 +107,9 @@ git clone https://github.com/sykang169/gemini-enterprise-dashboard.git && cd gem
 >   -var="enable_log_archive=true" -var="enable_scheduled_archive=true"
 > ```
 >
-> 뷰가 실제로 읽는 로그만 골라 `t_logs_archive`(파티션 테이블)에 증분 복사합니다. **38일 기준 20.6GB → 11MB** — 저장비는 반올림하면 0입니다. 매일 02:00 KST 증분 실행하며, 중복키 `(log_name, timestamp, insert_id)` MERGE라 재실행해도 안전합니다.
+> 뷰가 실제로 읽는 로그만 골라 `t_logs_archive`(파티션 테이블)에 증분 복사합니다. **38일 기준 20.6GB → 11MB** — 저장비는 반올림하면 0입니다. **매시간** 증분 실행하며, 중복키 `(log_name, timestamp, insert_id)` MERGE라 재실행해도 안전합니다.
+>
+> **뷰는 아카이브만 읽습니다**(`v_log_source`). `_AllLogs`는 날짜로만 파티션돼 `log_name` 프루닝이 불가능해서, 한 번 읽으면 그 기간의 무관한 로그(전체의 73%)까지 `json_payload`를 통째로 스캔합니다. 실측으로 차트 조회가 **7,502MB → 1.28MB (5,861배↓)** 였습니다. 대가는 **최대 1시간 지연**인데, 모든 지표가 일별 집계라 차트가 읽히는 값은 달라지지 않습니다.
 >
 > **반드시 미리 켜세요.** 아카이브는 버킷에 아직 남아 있는 것만 저장할 수 있어, 리텐션이 지난 뒤 켜면 그 데이터는 돌아오지 않습니다.
 

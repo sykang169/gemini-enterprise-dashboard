@@ -106,7 +106,22 @@ DECLARE watermark TIMESTAMP DEFAULT (
 
 -- Re-scan this far behind the watermark to catch late-arriving entries. The
 -- MERGE key means re-reading rows is free of side effects.
-DECLARE lookback TIMESTAMP DEFAULT TIMESTAMP_SUB(watermark, INTERVAL 2 DAY);
+--
+-- SIZED FOR THE HOURLY SCHEDULE. The window is what this job pays for: reading
+-- _AllLogs cannot be pruned by log_name, so every hour of window drags in every
+-- unrelated log in it. Measured: a 2-day lookback scanned 3,806 MB per run --
+-- fine once a day, but 91 GB/day at hourly. 3 hours keeps an hourly run at
+-- ~300 MB while still tolerating logs that land up to 3h behind their event
+-- time. (DECLARE variables DO prune -- verified: a 3h window scans 2.1 MB vs
+-- 284.9 MB unfiltered -- so the old 2-day figure was honest work, not a
+-- planner failure.)
+--
+-- SELF-HEALING IS PRESERVED, which is why the window hangs off the watermark
+-- rather than off CURRENT_TIMESTAMP. If the schedule stops for two days the
+-- watermark stays two days old, so lookback does too, and `timestamp >=
+-- lookback` (no upper bound) sweeps the entire gap on the next successful run.
+-- A fixed "now - 3 hours" window would silently skip everything older.
+DECLARE lookback TIMESTAMP DEFAULT TIMESTAMP_SUB(watermark, INTERVAL 3 HOUR);
 
 MERGE `YOUR_PROJECT_ID.gemini_ent_dashboard.t_logs_archive` T
 USING (

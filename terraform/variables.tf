@@ -215,13 +215,19 @@ variable "archive_schedule" {
     BigQuery Data Transfer Service schedule for the daily log archive
     (archive.tf). Default "every day 17:00".
 
-    Evaluated in UTC — the API has no timezone parameter. "every day 17:00" =
-    17:00 UTC = 02:00 KST (next day), deliberately one hour ahead of the
-    default content-classification schedule (var.scheduled_query_schedule,
-    18:00 UTC) so a day's logs are archived before the classifier reads them.
+    Hourly by default, because the dashboard now reads ONLY the archive
+    (see v_log_source in sql/01) -- this schedule IS the dashboard's refresh
+    rate, and its worst-case staleness.
+
+    Hourly is affordable only because sql/03's lookback was sized to match
+    (3h): the job pays for every hour of window it scans. Do not widen the
+    schedule interval past the lookback, or rows will be skipped on the happy
+    path; widen the lookback first.
+
+    Evaluated in UTC — the API has no timezone parameter.
   EOT
   type        = string
-  default     = "every day 17:00"
+  default     = "every 1 hours"
 }
 
 variable "enable_content_classification" {

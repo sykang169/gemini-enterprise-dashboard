@@ -98,7 +98,9 @@ git clone https://github.com/sykang169/gemini-enterprise-dashboard.git && cd gem
 >   -var="enable_log_archive=true" -var="enable_scheduled_archive=true"
 > ```
 >
-> 뷰가 실제로 읽는 로그만 골라 `t_logs_archive`(파티션 테이블)에 증분 복사합니다. **38일 기준 20.6GB → 11MB** — 저장비는 반올림하면 0입니다. 매일 02:00 KST 증분 실행하며, 중복키 `(log_name, timestamp, insert_id)` MERGE라 재실행해도 안전합니다.
+> 뷰가 실제로 읽는 로그만 골라 `t_logs_archive`(파티션 테이블)에 증분 복사합니다. **38일 기준 20.6GB → 11MB** — 저장비는 반올림하면 0입니다. **매시간** 증분 실행하며, 중복키 `(log_name, timestamp, insert_id)` MERGE라 재실행해도 안전합니다.
+>
+> **뷰는 아카이브만 읽습니다**(`v_log_source`). `_AllLogs`는 날짜로만 파티션돼 `log_name` 프루닝이 불가능해서, 한 번 읽으면 그 기간의 무관한 로그(전체의 73%)까지 `json_payload`를 통째로 스캔합니다. 실측으로 차트 조회가 **7,502MB → 1.28MB (5,861배↓)** 였습니다. 대가는 **최대 1시간 지연**인데, 모든 지표가 일별 집계라 차트가 읽히는 값은 달라지지 않습니다.
 >
 > **반드시 미리 켜세요.** 아카이브는 버킷에 아직 남아 있는 것만 저장할 수 있어, 리텐션이 지난 뒤 켜면 그 데이터는 돌아오지 않습니다.
 

@@ -44,11 +44,13 @@
 # actually revert, PATCH the engine yourself:
 #
 #   curl -X PATCH -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+#     -H "X-Goog-User-Project: PROJECT" \
 #     -H "Content-Type: application/json" \
 #     -d '{"observabilityConfig":{"sensitiveLoggingEnabled":false}}' \
 #     "https://discoveryengine.googleapis.com/v1alpha/projects/PROJECT/locations/global/collections/default_collection/engines/ENGINE?updateMask=observabilityConfig.sensitiveLoggingEnabled"
 #
-# (Note the leaf-path mask there too — see the updateMask warning below.)
+# (Note the leaf-path mask there too — see the updateMask warning below, and
+# the X-Goog-User-Project warning for why that header is load-bearing.)
 #
 # WHAT IT SETS, AND ON WHICH ENGINES
 # ----------------------------------
@@ -104,11 +106,30 @@
 # every dashboard view. Naming both leaf paths explicitly, as below, is what
 # keeps the PATCH surgical. Do not "simplify" this mask.
 #
+# *** X-Goog-User-Project IS NOT OPTIONAL — VERIFIED THE HARD WAY ***
+# discoveryengine requires a quota project, and a raw curl carrying only
+# `gcloud auth print-access-token` does not send one: gcloud attaches
+# x-goog-user-project from core/project itself, but the bare token does not
+# carry it. Without the header the API attributes the call to the *gcloud
+# CLI's own* client project (32555940559) and rejects it with a 403 whose
+# reason is SERVICE_DISABLED — which reads exactly like "the API is off in
+# your project" or "you lack discoveryengine.admin", and is neither.
+# Confirmed against the live API (2026-07-15): the same GET that a service
+# account answers with 200 returns that 403 under a user credential, because
+# an SA token carries its own project and a user token does not. Cloud Shell
+# runs as a user, which is why this only ever bites there. Sending the header
+# needs serviceusage.services.use on var.project_id
+# (roles/serviceusage.serviceUsageConsumer; project owners already have it) —
+# without it the 403 becomes USER_PROJECT_DENIED naming var.project_id, which
+# means the header landed and only IAM is left.
+# `gcloud auth application-default set-quota-project` does NOT fix this — ADC
+# is not what these calls use. Do not drop the header.
+#
 # LIMITATIONS (inherited from the local-exec approach):
 #   - Not visible in `terraform plan`.
 #   - Runs from whatever machine executes `terraform apply`; that principal
-#     needs discoveryengine.engines.update (e.g. roles/discoveryengine.admin)
-#     and requires curl + python3 on PATH.
+#     needs discoveryengine.engines.update (e.g. roles/discoveryengine.admin),
+#     serviceusage.services.use (see above), and curl + python3 on PATH.
 #   - `triggers` is keyed to the flag + engine list, so it re-runs when you
 #     flip the flag or change which engines are targeted — not on every apply.
 #   - Engines are assumed to live at locations/global under
@@ -176,11 +197,26 @@ resource "null_resource" "enable_sensitive_logging" {
         # "engines" key, which would otherwise be indistinguishable from a
         # legitimately empty project and get swallowed as a warning.
         HTTP_CODE="$(curl -sS -o "$RESP" -w '%%{http_code}' \
-          -H "Authorization: Bearer $TOKEN" "$BASE")"
+          -H "Authorization: Bearer $TOKEN" \
+          -H "X-Goog-User-Project: $PROJECT" "$BASE")"
         if [[ "$HTTP_CODE" != "200" ]]; then
           echo ">>> ERROR: could not list engines in $PROJECT (HTTP $HTTP_CODE)." >&2
-          echo ">>> The principal running terraform needs discoveryengine.engines.list" >&2
-          echo ">>> and .update (e.g. roles/discoveryengine.admin) on $PROJECT." >&2
+          echo ">>> Read the response below before assuming it is IAM. Match the 'reason'" >&2
+          echo ">>> and 'consumer' fields against these — they mean different things:" >&2
+          echo ">>>   USER_PROJECT_DENIED, consumer $PROJECT" >&2
+          echo ">>>     -> the quota project reached the API but this principal may not bill" >&2
+          echo ">>>        to it. Grant serviceusage.services.use on $PROJECT:" >&2
+          echo ">>>          gcloud projects add-iam-policy-binding $PROJECT \\" >&2
+          echo ">>>            --member='user:YOU@example.com' \\" >&2
+          echo ">>>            --role='roles/serviceusage.serviceUsageConsumer'" >&2
+          echo ">>>   SERVICE_DISABLED, consumer projects/32555940559" >&2
+          echo ">>>     -> 32555940559 is the gcloud CLI's own client project, NOT yours." >&2
+          echo ">>>        The X-Goog-User-Project header did not reach the API. This is a" >&2
+          echo ">>>        bug in this script, not something you can fix with IAM." >&2
+          echo ">>>   SERVICE_DISABLED, consumer $PROJECT" >&2
+          echo ">>>     -> discoveryengine.googleapis.com really is off. See apis.tf." >&2
+          echo ">>>   anything naming discoveryengine.engines.list" >&2
+          echo ">>>     -> genuinely missing IAM, e.g. roles/discoveryengine.admin on $PROJECT." >&2
           cat "$RESP" >&2
           exit 1
         fi
@@ -214,6 +250,7 @@ print(" ".join(on))
         HTTP_CODE="$(curl -sS -o "$RESP" -w '%%{http_code}' \
           -X PATCH \
           -H "Authorization: Bearer $TOKEN" \
+          -H "X-Goog-User-Project: $PROJECT" \
           -H "Content-Type: application/json" \
           -d "$BODY" \
           "$BASE/$ENG?updateMask=$PATCH_MASK")"

@@ -115,8 +115,21 @@ SELECT * FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.t_logs_archive`
 -- v_daily_queries
 -- ---------------------------------------------------------------------
 CREATE OR REPLACE VIEW `YOUR_PROJECT_ID.gemini_ent_dashboard.v_daily_queries` AS
-SELECT TIMESTAMP_TRUNC(timestamp, DAY) AS day, COUNT(*) AS queries
-FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.v_log_source` WHERE log_name LIKE '%gemini_enterprise_user_activity' AND JSON_VALUE(json_payload,'$.logMetadata.methodName') IN ('Search','StreamAssist') GROUP BY day
+-- engine_id = which Gemini Enterprise app served the query, so a shared
+-- project can slice per app. It is a COALESCE because the field moves: for
+-- Search/StreamAssist the engine is a segment of logMetadata.name, but for
+-- WriteUserEvent that name is only "projects/<n>/locations/global" and the
+-- engine lives in request.userEvent.engine instead. resource.labels does NOT
+-- carry it on user_activity rows (it is `consumed_api` there) -- only gen_ai
+-- rows get a structured resource.labels.engine_id. Verified: the COALESCE
+-- resolves an engine for 100% of user_activity rows across all methods.
+SELECT TIMESTAMP_TRUNC(timestamp, DAY) AS day,
+  COALESCE(
+    REGEXP_EXTRACT(JSON_VALUE(json_payload.logMetadata.name), r"/engines/([^/]+)"),
+    REGEXP_EXTRACT(JSON_VALUE(json_payload.request.userEvent.engine), r"/engines/([^/]+)")
+  ) AS engine_id,
+  COUNT(*) AS queries
+FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.v_log_source` WHERE log_name LIKE '%gemini_enterprise_user_activity' AND JSON_VALUE(json_payload,'$.logMetadata.methodName') IN ('Search','StreamAssist') GROUP BY day, engine_id
 ;
 
 -- ---------------------------------------------------------------------
@@ -262,11 +275,76 @@ FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.v_log_source` WHERE log_name LIKE '%g
 -- v_agent_usage_daily
 -- ---------------------------------------------------------------------
 CREATE OR REPLACE VIEW `YOUR_PROJECT_ID.gemini_ent_dashboard.v_agent_usage_daily` AS
-SELECT TIMESTAMP_TRUNC(timestamp, DAY) AS day,
-  JSON_VALUE(resource.labels,'$.agent_id') AS agent_id,
-  COUNT(*) AS user_turns
-FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.v_log_source` WHERE log_name LIKE '%gen_ai.user.message'
-GROUP BY day, agent_id
+-- Per-agent invocations. Source is user_activity's request.agentsSpec, NOT
+-- gen_ai's resource.labels.agent_id.
+--
+-- *** WHY NOT gen_ai.resource.labels.agent_id ***
+-- That label looks like exactly the right field and is what this view used to
+-- read. It is useless for this question: it identifies the ASSISTANT that
+-- served the turn, not the agent the user picked. Verified on the live
+-- dataset -- across all 2,927 gen_ai rows it has exactly ONE distinct value:
+--   {"agent_id":"core_assistant","assistant_id":"default_assistant",
+--    "engine_id":"gemini-enterprise-17821883_...", ...}
+-- So the old view reported "one agent, all traffic" no matter how many custom
+-- agents existed (19 in the source project) or which ones ran. It was not
+-- empty, which is worse -- it was confidently wrong.
+--
+-- The agent the caller actually invoked is in the StreamAssist REQUEST:
+--   request.agentsSpec.agentSpecs[].agentId
+-- It is an array because a turn can address more than one agent, hence the
+-- UNNEST. Values are either a numeric custom-agent id (e.g. 2449938318073800485)
+-- or a built-in slug (deep_research, default_idea_generation).
+--
+-- COVERAGE, HONESTLY: only turns that target an agent carry agentsSpec.
+-- Ordinary assistant chat has no agentsSpec and is absent here by design --
+-- this view answers "which agents get used", not "how much traffic exists".
+-- Agent *page views* (someone browsing the gallery) are a different signal and
+-- live in v_agent_page_views below.
+--
+-- Display names are NOT in the logs (the API has them; the logs carry ids
+-- only, and pre-sensitive-logging rows elide even those). Join to your own
+-- agent inventory if you need names.
+SELECT
+  TIMESTAMP_TRUNC(t.timestamp, DAY) AS day,
+  COALESCE(
+    REGEXP_EXTRACT(JSON_VALUE(t.json_payload.logMetadata.name), r"/engines/([^/]+)"),
+    REGEXP_EXTRACT(JSON_VALUE(t.json_payload.request.userEvent.engine), r"/engines/([^/]+)")
+  ) AS engine_id,
+  JSON_VALUE(a, '$.agentId') AS agent_id,
+  COUNT(*) AS calls,
+  COUNT(DISTINCT JSON_VALUE(t.json_payload.userIamPrincipal)) AS users
+FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.v_log_source` AS t,
+  UNNEST(JSON_QUERY_ARRAY(t.json_payload.request.agentsSpec.agentSpecs)) AS a
+WHERE t.log_name LIKE '%gemini_enterprise_user_activity'
+GROUP BY day, engine_id, agent_id
+;
+
+-- ---------------------------------------------------------------------
+-- v_agent_page_views
+-- ---------------------------------------------------------------------
+-- Which agents users BROWSE, from WriteUserEvent UI telemetry
+-- (request.userEvent.agentspaceInfo). This is discovery/interest, not usage:
+-- eventType=view-category-page with agentspacePageType=agent means someone
+-- opened an agent's page. Read together with v_agent_usage_daily it shows the
+-- gap between agents people look at and agents people actually run.
+--
+-- Note the engine here comes from request.userEvent.engine, NOT
+-- logMetadata.name -- for WriteUserEvent the latter is just
+-- "projects/<n>/locations/global" with no engine segment. That asymmetry is
+-- why every engine_id expression in this file is a COALESCE of the two.
+CREATE OR REPLACE VIEW `YOUR_PROJECT_ID.gemini_ent_dashboard.v_agent_page_views` AS
+SELECT
+  TIMESTAMP_TRUNC(timestamp, DAY) AS day,
+  REGEXP_EXTRACT(JSON_VALUE(json_payload.request.userEvent.engine), r"/engines/([^/]+)") AS engine_id,
+  JSON_VALUE(json_payload.request.userEvent.agentspaceInfo.agentInfo.agentId) AS agent_id,
+  JSON_VALUE(json_payload.request.userEvent.agentspaceInfo.agentspacePageType) AS page_type,
+  COUNT(*) AS views,
+  COUNT(DISTINCT JSON_VALUE(json_payload.userIamPrincipal)) AS users
+FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.v_log_source`
+WHERE log_name LIKE '%gemini_enterprise_user_activity'
+  AND JSON_VALUE(json_payload.logMetadata.methodName) = 'WriteUserEvent'
+  AND JSON_VALUE(json_payload.request.userEvent.agentspaceInfo.agentInfo.agentId) IS NOT NULL
+GROUP BY day, engine_id, agent_id, page_type
 ;
 
 -- ---------------------------------------------------------------------
@@ -422,6 +500,10 @@ CREATE OR REPLACE VIEW `YOUR_PROJECT_ID.gemini_ent_dashboard.v_user_questions` A
 SELECT
   timestamp,
   TIMESTAMP_TRUNC(timestamp, DAY) AS day,
+  COALESCE(
+    REGEXP_EXTRACT(JSON_VALUE(json_payload.logMetadata.name), r"/engines/([^/]+)"),
+    REGEXP_EXTRACT(JSON_VALUE(json_payload.request.userEvent.engine), r"/engines/([^/]+)")
+  ) AS engine_id,
   JSON_VALUE(json_payload,'$.userIamPrincipal') AS user_id,
   JSON_VALUE(json_payload,'$.logMetadata.methodName') AS method,
   COALESCE(

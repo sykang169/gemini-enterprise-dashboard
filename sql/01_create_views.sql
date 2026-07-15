@@ -476,15 +476,38 @@ GROUP BY day, operation
 --   Source: gemini_enterprise_user_activity log -- both question and
 --   answer live in the SAME row, so no join is needed. user_id comes
 --   straight from userIamPrincipal.
---     question_text: Search -> $.request.query (scalar string);
---       StreamAssist -> $.request.query.parts[].text (object).
---     answer_text (StreamAssist only; null for Search keyword lookups):
---       grounded answers -> the answer is split across
+--
+--   STREAMASSIST ONLY, DELIBERATELY. This view used to also carry the
+--   Search rows and expose a `method` column to tell them apart. The two
+--   are different events, not two flavours of one: StreamAssist is an
+--   assistant turn (question + generated answer), Search is a keyword
+--   lookup that returns hits and NEVER produces an answer. Mixing them
+--   meant answer_text was structurally null on ~45% of rows (measured on
+--   the live dataset: 93 of 207) -- not missing data, just a column that
+--   could not apply -- and every reader had to know to filter on `method`
+--   first. Search rows now live in v_search_queries, which has no answer
+--   column at all. The `method` column is gone with them: it is constant
+--   here, so it only ever said "StreamAssist" 114 times.
+--   Do not "restore" it by widening the filter.
+--
+--     question_text: $.request.query.parts[].text.
+--     answer_text: grounded answers -> the answer is split across
 --       $...replies[].groundedContent.textGroundingMetadata.segments[].text,
 --       reassembled in startIndex order; ungrounded answers (state
 --       SKIPPED) -> $...replies[].groundedContent.content.text. COALESCE
---       picks whichever shape the row uses. A few turns (empty/aborted
---       replies) log no answer text -> answer_text is null.
+--       picks whichever shape the row uses.
+--
+--   answer_text IS STILL NULL SOMETIMES, for reasons no view can fix
+--   (counts below measured on the live dataset 2026-07-15, 114 rows):
+--     - turns logged before sensitiveLoggingEnabled took effect: request
+--       .query is `{}` and serviceTextReply is the literal "<elided>".
+--       Masked at the source, forward-only, unrecoverable. 93 of 114 rows
+--       -- the flag was flipped partway through 2026-07-14, so that day
+--       has masked and unmasked turns in it.
+--     - a few SUCCEEDED turns log `groundedContent: {}` -- an empty reply
+--       with no text anywhere in it (7 rows). Nothing to extract.
+--   So a null answer_text next to a real question_text means "the log has
+--   no answer", not "the extraction missed it".
 --   REQUIRES sensitive logging: the engine's
 --   observabilityConfig.sensitiveLoggingEnabled must be true, otherwise
 --   userIamPrincipal / question / answer are masked to the literal
@@ -505,13 +528,11 @@ SELECT
     REGEXP_EXTRACT(JSON_VALUE(json_payload.request.userEvent.engine), r"/engines/([^/]+)")
   ) AS engine_id,
   JSON_VALUE(json_payload,'$.userIamPrincipal') AS user_id,
-  JSON_VALUE(json_payload,'$.logMetadata.methodName') AS method,
-  COALESCE(
-    JSON_VALUE(json_payload,'$.request.query'),
-    (SELECT STRING_AGG(JSON_VALUE(p,'$.text'), '\n')
-       FROM UNNEST(JSON_QUERY_ARRAY(json_payload,'$.request.query.parts')) p
-       WHERE JSON_VALUE(p,'$.text') IS NOT NULL)
-  ) AS question_text,
+  -- Scalar $.request.query was the Search shape; StreamAssist always uses
+  -- the parts[] object, so no COALESCE is needed here any more.
+  (SELECT STRING_AGG(JSON_VALUE(p,'$.text'), '\n')
+     FROM UNNEST(JSON_QUERY_ARRAY(json_payload,'$.request.query.parts')) p
+     WHERE JSON_VALUE(p,'$.text') IS NOT NULL) AS question_text,
   COALESCE(
     (SELECT STRING_AGG(JSON_VALUE(seg,'$.text'), '' ORDER BY SAFE_CAST(JSON_VALUE(seg,'$.startIndex') AS INT64))
        FROM UNNEST(JSON_QUERY_ARRAY(json_payload,'$.response.answer.replies')) r,
@@ -522,5 +543,40 @@ SELECT
   trace
 FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.v_log_source`
 WHERE log_name LIKE '%gemini_enterprise_user_activity'
-  AND JSON_VALUE(json_payload,'$.logMetadata.methodName') IN ('Search','StreamAssist')
+  AND JSON_VALUE(json_payload,'$.logMetadata.methodName') = 'StreamAssist'
+;
+
+-- ---------------------------------------------------------------------
+-- v_search_queries
+--   The Search half of gemini_enterprise_user_activity: keyword lookups
+--   against an engine's data stores. Split out of v_user_questions (see
+--   that view's comment) because a Search event has no assistant answer
+--   to show -- it returns hits, not generated text. Giving it its own
+--   view means it has no answer column to leave empty, and the Q&A view
+--   has no rows that can never be answered.
+--
+--   query_text reads $.request.query as a SCALAR STRING here. That is the
+--   Search shape; StreamAssist nests the same field as an object under
+--   $.request.query.parts[]. Same JSON path, different type, which is why
+--   one COALESCE used to cover both and read as if the shapes were
+--   interchangeable. They are not.
+--
+--   No answer_text, and no `method` column: every row here is a Search.
+--   PRIVACY: exposes raw query text + user identity, same as
+--   v_user_questions -- restrict report sharing and dataset IAM.
+-- ---------------------------------------------------------------------
+CREATE OR REPLACE VIEW `YOUR_PROJECT_ID.gemini_ent_dashboard.v_search_queries` AS
+SELECT
+  timestamp,
+  TIMESTAMP_TRUNC(timestamp, DAY) AS day,
+  COALESCE(
+    REGEXP_EXTRACT(JSON_VALUE(json_payload.logMetadata.name), r"/engines/([^/]+)"),
+    REGEXP_EXTRACT(JSON_VALUE(json_payload.request.userEvent.engine), r"/engines/([^/]+)")
+  ) AS engine_id,
+  JSON_VALUE(json_payload,'$.userIamPrincipal') AS user_id,
+  JSON_VALUE(json_payload,'$.request.query') AS query_text,
+  trace
+FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.v_log_source`
+WHERE log_name LIKE '%gemini_enterprise_user_activity'
+  AND JSON_VALUE(json_payload,'$.logMetadata.methodName') = 'Search'
 ;

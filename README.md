@@ -55,6 +55,14 @@ git clone https://github.com/sykang169/gemini-enterprise-dashboard.git && cd gem
 
 > **Looker Studio 자동 생성:** Looker Studio는 차트를 코드로 맨바닥에서 만드는 API가 없어, 완성형 대시보드는 **템플릿 리포트 복제** 방식으로 자동화합니다. `looker_studio_setup.md` 섹션 0을 따라 한 번 템플릿을 만들고 `-var="looker_studio_template_report_id=<REPORT_ID>"`로 배포하면, 이후 어떤 프로젝트든 완성형 대시보드를 한 URL로 복제 생성합니다.
 
+> ### 🛡️ Model Armor는 별도 구성입니다 (보안 지표 10개의 전제)
+>
+> 지표 24개 중 **10개가 Model Armor 로그에 의존**합니다(차단율·위협유형·프롬프트 인젝션·verdict·업무분류). **이 모듈은 MA를 자동 구성하지 않습니다** — 안 붙이면 그 뷰들은 배포는 되지만 영원히 빈 채로 남습니다. 템플릿 생성 → GE 연결 → 확인까지 `tutorial.md`의 **"(선택) Model Armor 연결"** 섹션에 클릭 단위로 있습니다.
+>
+> 두 가지만 미리 알아두세요:
+> - **`--template-metadata-log-sanitize-operations`가 생명줄입니다.** 기본값이 아니고, 없으면 MA가 검사는 하되 로그를 안 남겨 뷰 10개가 영원히 빕니다.
+> - **설정은 engine이 아니라 그 아래 `assistants/default_assistant`에 붙습니다** — `customerPolicy.modelArmorConfig`. Search 전용 앱은 assistant가 없어 MA 대상이 아닙니다.
+
 > ### ⚠️ 질문·응답 원문을 보려면 배포 **전에** 결정하세요 (`enable_sensitive_logging`)
 >
 > Gemini Enterprise는 기본적으로 로그의 민감 필드를 `<elided>`로 마스킹합니다. 이 플래그 없이 배포하면 **질문·응답·사용자ID가 전부 가려진 채 쌓이고**, `v_user_questions`는 비어 보이며 `v_queries_per_user`·`v_daily_active_users`는 사용자 1명으로 붕괴하고 콘텐츠 분류는 분류할 텍스트가 없습니다.

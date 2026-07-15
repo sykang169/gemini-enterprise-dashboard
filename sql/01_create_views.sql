@@ -61,26 +61,53 @@ CREATE OR REPLACE VIEW `YOUR_PROJECT_ID.gemini_ent_dashboard.v_log_source` AS
 --   SELECT * FROM v_log_source (w/ UNION) . 5,930 MB      <- 2,556x more
 --
 -- A 20-chart Looker dashboard re-queries every view on load, so that union was
--- ~118 GB (~$0.59) PER PAGE LOAD, and it scales with total log volume rather
--- than with the dashboard's own data. Reading only the archive -- which is
--- pre-filtered to the logs the views need, partitioned by day and clustered by
--- log_name -- makes the same page load ~46 MB, and keeps it roughly flat as the
--- project's logging grows.
+-- ~118 GB (~$0.59) PER PAGE LOAD, and it scaled with total log volume rather
+-- than with the dashboard's own data. Reading only the archive -- pre-filtered
+-- to the logs the views need, partitioned by day, clustered by log_name --
+-- made the same page load ~46 MB.
 --
--- THE TRADE-OFF: the dashboard is now as fresh as the last archive run, not
--- real-time. sql/03 runs hourly (var.archive_schedule), so worst case is ~1
--- hour behind. Every metric here is a daily aggregate, so an hour of lag does
--- not change what anyone reads off the charts.
+-- FRESHNESS: the dashboard is as fresh as the last archive run (hourly, see
+-- var.archive_schedule), not real-time. Every metric here is a daily
+-- aggregate, so an hour of lag does not change what anyone reads off a chart.
+-- If the archive stops, the dashboard goes stale rather than wrong, and the
+-- next successful run backfills the gap (watermark logic in sql/03).
 --
--- If the archive stops running the dashboard goes stale rather than wrong: it
--- keeps showing everything up to the last successful run. Nothing is lost --
--- the logs sit in the bucket until retention expires and the next successful
--- run backfills them (see the watermark logic in sql/03). Monitor the
--- "Gemini Ent - Daily Log Archive" scheduled query.
+-- ---------------------------------------------------------------------
+-- THE WINDOW: why charts are capped at DASHBOARD_WINDOW_DAYS days
+-- ---------------------------------------------------------------------
+-- Archive-only fixed the constant factor, not the growth. The archive is
+-- append-only forever, so without a bound every chart's scan grows for the
+-- life of the deployment -- a 3-year-old install would scan 3 years of logs to
+-- draw "queries per day", every refresh, forever.
 --
--- The indirection is kept even though it is now a plain passthrough: the 20
--- views below read v_log_source, so the source can change again without
--- touching any of them.
+-- A date filter DOES prune through these views -- verified on the live
+-- dataset, filtering the aggregate views' `day` column (a TIMESTAMP_TRUNC of
+-- the partition column) still prunes partitions:
+--   v_daily_queries  no filter 1,345,193 B -> WHERE day >= ... 935,881 B
+--   v_user_questions no filter 1,448,621 B -> WHERE day >= ... 1,032,339 B
+-- So a Looker report WITH a date-range control already prunes. The bound below
+-- exists for the report WITHOUT one: a chart dropped on a page with no date
+-- control sends no filter and would scan the entire archive. The default is
+-- the safety net, not a replacement for date controls.
+--
+-- This does NOT shrink the archive or lose history. t_logs_archive still holds
+-- everything, and v_log_source_all (below) reads it unbounded for ad-hoc and
+-- compliance queries. This only bounds what the CHARTS reach for by default.
+--
+-- Sized against retention, not taste: the log bucket keeps 30 days, so a
+-- 90-day default still shows 3x what the logs alone could. Raise it with
+-- var.dashboard_window_days (0 = unbounded) if you need longer trends on the
+-- dashboard itself, and accept the scan.
+SELECT * FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.t_logs_archive`
+WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL DASHBOARD_WINDOW_DAYS DAY)
+;
+
+-- Unbounded view over the full archive, for ad-hoc SQL and compliance/export
+-- questions ("what did anyone ask in March?") that legitimately need history
+-- older than the dashboard window. Deliberately NOT what the v_* views read:
+-- point a Looker chart at this and you are back to scanning the whole archive
+-- on every refresh. Always filter it by timestamp.
+CREATE OR REPLACE VIEW `YOUR_PROJECT_ID.gemini_ent_dashboard.v_log_source_all` AS
 SELECT * FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.t_logs_archive`
 ;
 

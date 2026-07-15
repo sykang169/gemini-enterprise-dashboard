@@ -57,10 +57,20 @@ locals {
   # targets, via `replace()` at plan time before the SQL is sent to BigQuery.
   # To run the .sql standalone (e.g. `bq query < sql/01_create_views.sql`),
   # substitute YOUR_PROJECT_ID with your real project id first.
+  # DASHBOARD_WINDOW_DAYS bounds how far back the chart views read (see
+  # var.dashboard_window_days). 0 means unbounded, which cannot be expressed as
+  # "INTERVAL 0 DAY" — that would show nothing — so the whole WHERE clause is
+  # swapped for a tautology and BigQuery drops it.
+  window_clause = var.dashboard_window_days == 0 ? "TRUE" : "timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ${var.dashboard_window_days} DAY)"
+
   create_views_sql = replace(
     replace(
       replace(
-        file("${path.module}/../sql/01_create_views.sql"),
+        replace(
+          file("${path.module}/../sql/01_create_views.sql"),
+          "timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL DASHBOARD_WINDOW_DAYS DAY)",
+          local.window_clause
+        ),
         "YOUR_PROJECT_ID", var.project_id
       ),
       "gemini_ent_analytics", var.analytics_dataset_id

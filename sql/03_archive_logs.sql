@@ -71,11 +71,15 @@
 -- the MERGE key absorb what it already has.
 -- =============================================================================
 
--- Create the archive on first run. `WHERE FALSE` copies _AllLogs' exact schema
--- (27 columns incl. RECORD/JSON types) without copying rows, so the archive and
--- the linked view stay structurally identical and `INSERT ROW` below keeps
--- working. Partitioned by day so the MERGE and the views prune; clustered by
--- log_name because every view filters on it.
+-- Normally a no-op: sql/01 already creates this table (empty) so that
+-- v_log_source can reference it unconditionally even when archiving is off.
+-- It is repeated here so this script also stands alone -- run straight via
+-- `bq query` against a dataset built before v_log_source existed and it still
+-- works. `WHERE FALSE` copies _AllLogs' exact schema (27 columns incl.
+-- RECORD/JSON types) without copying rows, keeping the archive structurally
+-- identical to the linked view so `INSERT ROW` below stays valid. Partitioned
+-- by day so the MERGE and the views prune; clustered by log_name because
+-- every view filters on it.
 CREATE TABLE IF NOT EXISTS `YOUR_PROJECT_ID.gemini_ent_dashboard.t_logs_archive`
 PARTITION BY DATE(timestamp)
 CLUSTER BY log_name

@@ -64,11 +64,14 @@ project_id = "your-gcp-project-id"
 #
 # START EARLY — the archive can only save what the bucket still holds.
 # enable_log_archive       = false   # one-shot: create table + backfill
-# enable_scheduled_archive = false   # daily incremental (without it, snapshot goes stale)
+# enable_scheduled_archive = false   # hourly incremental (without it, snapshot goes stale)
 
 # Schedule for the above. UTC, no timezone param.
-# "every day 17:00" = 02:00 KST, one hour before the classifier reads the logs.
-# archive_schedule = "every day 17:00"
+# The charts read ONLY the archive, so this IS the dashboard's refresh rate and
+# its worst-case staleness. Hourly is affordable because sql/03's lookback (3h)
+# was sized to match — don't stretch the interval past the lookback or rows get
+# skipped; widen the lookback first.
+# archive_schedule = "every 1 hours"
 
 # --- Opt-in, cost-incurring flags (both default to false) ------------------
 

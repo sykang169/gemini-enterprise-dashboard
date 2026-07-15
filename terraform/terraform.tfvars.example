@@ -45,6 +45,25 @@ project_id = "your-gcp-project-id"
 #     a fresh app that has never had observability turned on.
 # sensitive_logging_engine_ids = ["my-app_1782188315701"]
 
+# --- Opt-in: durable log archive -------------------------------------------
+
+# _AllLogs is a VIEW over the _Default log bucket (0 bytes of its own), so the
+# bucket's retention (30 days by default) is the hard limit on how far back ANY
+# view can see, and expired logs are gone — there is no backfill. These two
+# flags keep a real partitioned copy (t_logs_archive) that outlives retention.
+#
+# Storage is negligible (~11 MB / 38 days — only the logs the views read).
+# Opt-in for governance: with enable_sensitive_logging on, archived rows hold
+# end-user prompts in the clear, so this makes that PII outlive retention.
+#
+# START EARLY — the archive can only save what the bucket still holds.
+# enable_log_archive       = false   # one-shot: create table + backfill
+# enable_scheduled_archive = false   # daily incremental (without it, snapshot goes stale)
+
+# Schedule for the above. UTC, no timezone param.
+# "every day 17:00" = 02:00 KST, one hour before the classifier reads the logs.
+# archive_schedule = "every day 17:00"
+
 # --- Opt-in, cost-incurring flags (both default to false) ------------------
 
 # Runs sql/02_content_classification.sql once per `terraform apply` (Gemini

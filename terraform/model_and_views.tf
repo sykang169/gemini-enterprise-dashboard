@@ -68,6 +68,17 @@ locals {
     "gemini_ent_dashboard", var.dashboard_dataset_id
   )
 
+  archive_logs_sql = replace(
+    replace(
+      replace(
+        file("${path.module}/../sql/03_archive_logs.sql"),
+        "YOUR_PROJECT_ID", var.project_id
+      ),
+      "gemini_ent_analytics", var.analytics_dataset_id
+    ),
+    "gemini_ent_dashboard", var.dashboard_dataset_id
+  )
+
   content_classification_sql = replace(
     replace(
       replace(

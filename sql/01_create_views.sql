@@ -84,13 +84,36 @@ FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs` WHERE log_name LIKE '%gemin
 -- ---------------------------------------------------------------------
 -- v_model_armor_block
 -- ---------------------------------------------------------------------
+-- ---------------------------------------------------------------------
+-- Model Armor views: why every one of them filters on client_name
+-- ---------------------------------------------------------------------
+-- A project-wide Model Armor floor setting inspects EVERY Vertex AI call in
+-- the project -- including this dashboard's own ML.GENERATE_TEXT content
+-- classification (sql/02). Those self-inflicted checks are logged as
+-- sanitize_operations rows with client_name=VERTEX_AI and are
+-- indistinguishable from user traffic by log_name alone.
+--
+-- Measured on the source project (38 days, before the junk was purged):
+--   client_name=VERTEX_AI              765,875 rows  (99.93%)  <- this dashboard
+--   client_name=GEMINI_ENTERPRISE_*        527 rows  ( 0.07%)  <- real users
+-- Unfiltered, these views reported the dashboard classifying its own prompts
+-- as if it were end-user activity: 2026-07-13 showed 420,692 "inspected"
+-- prompts on a day with ZERO real user prompts.
+--
+-- client_name lives in `labels`, NOT in resource.labels, and the key contains
+-- dots and a slash -- hence the quoted JSON path below. Real Gemini Enterprise
+-- traffic is GEMINI_ENTERPRISE_BUSINESS / GEMINI_ENTERPRISE_NON_BUSINESS, so
+-- the LIKE prefix catches both. Do not drop this filter to "simplify" the
+-- views: it is what separates user behaviour from the dashboard's own exhaust.
+-- ---------------------------------------------------------------------
 CREATE OR REPLACE VIEW `YOUR_PROJECT_ID.gemini_ent_dashboard.v_model_armor_block` AS
 SELECT TIMESTAMP_TRUNC(timestamp, DAY) AS day,
   JSON_VALUE(json_payload,'$.operationType') AS operation,
   COUNTIF(JSON_VALUE(json_payload,'$.sanitizationResult.filterMatchState')='MATCH_FOUND') AS blocked,
   COUNT(*) AS inspected,
   ROUND(SAFE_DIVIDE(COUNTIF(JSON_VALUE(json_payload,'$.sanitizationResult.filterMatchState')='MATCH_FOUND'),COUNT(*))*100,2) AS block_pct
-FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs` WHERE log_name LIKE '%sanitize_operations' GROUP BY day, operation
+FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs` WHERE log_name LIKE '%sanitize_operations'
+  AND JSON_VALUE(labels,'$."modelarmor.googleapis.com/client_name"') LIKE 'GEMINI_ENTERPRISE%' GROUP BY day, operation
 ;
 
 -- ---------------------------------------------------------------------
@@ -103,7 +126,8 @@ SELECT TIMESTAMP_TRUNC(timestamp, DAY) AS day,
   COUNTIF(JSON_VALUE(json_payload,'$.sanitizationResult.filterResults.rai.raiFilterResult.raiFilterTypeResults.hate_speech.matchState')='MATCH_FOUND') AS hate_speech,
   COUNTIF(JSON_VALUE(json_payload,'$.sanitizationResult.filterResults.rai.raiFilterResult.raiFilterTypeResults.sexually_explicit.matchState')='MATCH_FOUND') AS sexually_explicit,
   COUNTIF(JSON_VALUE(json_payload,'$.sanitizationResult.filterResults.csam.csamFilterFilterResult.matchState')='MATCH_FOUND') AS csam
-FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs` WHERE log_name LIKE '%sanitize_operations' GROUP BY day
+FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs` WHERE log_name LIKE '%sanitize_operations'
+  AND JSON_VALUE(labels,'$."modelarmor.googleapis.com/client_name"') LIKE 'GEMINI_ENTERPRISE%' GROUP BY day
 ;
 
 -- ---------------------------------------------------------------------
@@ -122,7 +146,8 @@ WITH base AS (
    COUNTIF(JSON_VALUE(json_payload,'$.sanitizationResult.filterResults.rai.raiFilterResult.raiFilterTypeResults.sexually_explicit.matchState')='MATCH_FOUND') sexually_explicit,
    COUNTIF(JSON_VALUE(json_payload,'$.sanitizationResult.filterResults.csam.csamFilterFilterResult.matchState')='MATCH_FOUND') csam,
    COUNTIF(JSON_VALUE(json_payload,'$.sanitizationResult.filterResults.pi_and_jailbreak.piAndJailbreakFilterResult.matchState')='MATCH_FOUND') prompt_injection
-  FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs` WHERE log_name LIKE '%sanitize_operations' GROUP BY day )
+  FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs` WHERE log_name LIKE '%sanitize_operations'
+  AND JSON_VALUE(labels,'$."modelarmor.googleapis.com/client_name"') LIKE 'GEMINI_ENTERPRISE%' GROUP BY day )
  GROUP BY day )
 SELECT day, threat_type, threat_count FROM base
 UNPIVOT(threat_count FOR threat_type IN (dangerous,harassment,hate_speech,sexually_explicit,csam,prompt_injection))
@@ -230,6 +255,7 @@ SELECT TIMESTAMP_TRUNC(timestamp,DAY) AS day,
   COUNT(*) AS inspected,
   ROUND(SAFE_DIVIDE(COUNTIF(JSON_VALUE(json_payload,'$.sanitizationResult.filterMatchState')='MATCH_FOUND'),COUNT(*))*100,2) AS block_pct
 FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs` WHERE log_name LIKE '%sanitize_operations'
+  AND JSON_VALUE(labels,'$."modelarmor.googleapis.com/client_name"') LIKE 'GEMINI_ENTERPRISE%'
 GROUP BY day, client_name, operation, template_id
 ;
 
@@ -264,6 +290,7 @@ SELECT TIMESTAMP_TRUNC(timestamp,DAY) AS day,
   COUNTIF(JSON_VALUE(json_payload,'$.sanitizationResult.sanitizationVerdict')='MODEL_ARMOR_SANITIZATION_VERDICT_BLOCK') AS blocked,
   COUNTIF(JSON_VALUE(json_payload,'$.sanitizationResult.filterResults.pi_and_jailbreak.piAndJailbreakFilterResult.matchState')='MATCH_FOUND') AS injection_attempts
 FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs` WHERE log_name LIKE '%sanitize_operations'
+  AND JSON_VALUE(labels,'$."modelarmor.googleapis.com/client_name"') LIKE 'GEMINI_ENTERPRISE%'
 GROUP BY day, operation
 ;
 

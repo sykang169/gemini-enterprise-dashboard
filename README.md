@@ -25,7 +25,7 @@ git clone https://github.com/sykang169/gemini-enterprise-dashboard.git && cd gem
 #    - 이후 자동: 그 리포트를 템플릿으로 등록하면 URL 하나로 완성형 대시보드 복제
 ```
 
-`deploy.sh`가 하는 일: 결제/인증 preflight → 필요한 API 활성화 → **원격 state 버킷 생성 + init** → BigQuery 데이터셋 → Log Analytics 링크 → BQ↔Gemini 연결·IAM → (IAM 전파 5분 대기 내장) → Gemini 원격 모델 → 대시보드 뷰 23개 → (옵션) 콘텐츠 분류·예약 쿼리 → **Looker Studio 구성 안내(또는 템플릿 지정 시 완성형 대시보드 복제 URL) 출력**.
+`deploy.sh`가 하는 일: 결제/인증 preflight → 필요한 API 활성화 → **원격 state 버킷 생성 + init** → BigQuery 데이터셋 → Log Analytics 링크 → BQ↔Gemini 연결·IAM → (IAM 전파 5분 대기 내장) → Gemini 원격 모델 → 대시보드 뷰 26개(지표 24 + 배관 2) → (옵션) 콘텐츠 분류·예약 쿼리 → **Looker Studio 구성 안내(또는 템플릿 지정 시 완성형 대시보드 복제 URL) 출력**.
 
 > ### 🗄️ Terraform state는 GCS에 있습니다 (다른 PC에서 배포해도 안전)
 >
@@ -85,7 +85,7 @@ git clone https://github.com/sykang169/gemini-enterprise-dashboard.git && cd gem
         ▼
 [t_logs_archive]  ← 영구 보관. 일 파티션 + log_name 클러스터
         │
-        ├─ v_log_source ── SQL 뷰 23개 ──▶ [Looker Studio (무료)]
+        ├─ v_log_source ── SQL 지표 뷰 24개 ──▶ [Looker Studio (무료)]
         │
         └─ (옵션) 질문 원문
              └─ BigQuery + Gemini(gemini-2.5-flash-lite) 분류
@@ -117,15 +117,16 @@ git clone https://github.com/sykang169/gemini-enterprise-dashboard.git && cd gem
 
 ---
 
-## 대시보드 지표 (23개 뷰)
+## 대시보드 지표 (24개 뷰)
 
 | 그룹 | 내용 | 내장 대비 |
 |------|------|-----------|
-| **운영** | 일별/유형별 쿼리, 에이전트 호출, DAU, 사용자당 쿼리, 시간대 히트맵 | 유사 |
+| **운영** | 일별/유형별 쿼리, DAU, 사용자당 쿼리, 시간대 히트맵 — **앱(engine_id)별 분리 가능** | 유사 |
 | **🛡️ 보안** | Model Armor 차단율, 위협유형(폭력/혐오/성/CSAM/**프롬프트 인젝션**), verdict, 업무/비업무 분류 | **없음** |
 | **⚡ 지연** | 응답 p50/p95 (trace 기반), 사용자·에이전트별 | **없음** |
 | **📚 품질** | 그라운딩 커버리지(할루시네이션 리스크), 인용 출처 Top | **없음** |
 | **🧠 콘텐츠** | 질문 토픽 분포, 의도, 감성(부정 급증 경보) — Gemini 분류 | **없음** |
+| **🤖 에이전트** | **에이전트별 실제 호출**(`v_agent_usage_daily`) + **페이지 조회**(`v_agent_page_views`) — 둘을 대비하면 "보기만 하고 안 쓰는" 에이전트가 드러남 | **없음** |
 | **👤 사용자** | 행 단위 드릴다운(user_id 필터), **질문 원문 검색**(`v_user_questions`) | 제한적 |
 
 ---
@@ -141,7 +142,7 @@ git clone https://github.com/sykang169/gemini-enterprise-dashboard.git && cd gem
 ├── looker_studio_create_url.txt  # 템플릿 복제 URL (생성물, 템플릿 지정 시에만)
 ├── log_analytics_dashboard_queries.sql  # 원본 KPI 쿼리 모음
 ├── sql/
-│   ├── 01_create_views.sql       # 뷰 22개: 지표 20개 + v_log_source(차트용) + v_log_source_all(ad-hoc)
+│   ├── 01_create_views.sql       # 뷰 23개: 지표 21개 + v_log_source(차트용) + v_log_source_all(ad-hoc)
 │   ├── 02_content_classification.sql  # Gemini 콘텐츠 분류 (옵션)
 │   └── 03_archive_logs.sql       # 로그 아카이브 증분 MERGE (옵션)
 ├── notebook/

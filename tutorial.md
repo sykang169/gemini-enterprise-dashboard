@@ -41,11 +41,44 @@ gcloud billing accounts list
 gcloud billing projects link <walkthrough-project-id/> --billing-account=<ACCOUNT_ID>
 ```
 
+## 질문·응답 원문 로깅 (지금 결정하세요)
+
+**이 선택은 배포 전에 해야 합니다. 나중에 켜면 소급이 안 됩니다.**
+
+Gemini Enterprise는 기본적으로 로그의 민감 필드를 `<elided>`로 마스킹합니다. 즉 **끄고 배포하면** 질문·응답·사용자ID가 전부 가려진 채 쌓이고, 나중에 켜도 **그 기간 데이터는 영구히 복구할 수 없습니다.**
+
+마스킹 상태에서 비어버리는 지표:
+
+| 뷰 | 마스킹 시 증상 |
+| --- | --- |
+| `v_user_questions` | 질문·응답이 통째로 비어 있음 |
+| `v_queries_per_user` | 전체가 `<elided>` 사용자 1명으로 합쳐짐 |
+| `v_daily_active_users` | 활성 사용자가 항상 1 |
+| `v_user_activity_detail` / `v_user_agent_trace` | 사용자 드릴다운 불가 |
+| 콘텐츠 분류(아래 단계) | 분류할 질문 텍스트가 없어 무의미 |
+
+**⚠️ 켜면 최종 사용자의 질문 원문과 신원이 평문으로** Cloud Logging에 기록되고 BigQuery로 복사됩니다. 실제 PII입니다. 켜기로 했다면 배포 후 `gemini_ent_analytics` / `gemini_ent_dashboard` 데이터셋의 IAM을 프롬프트 열람 권한자에게만 열어두세요.
+
+- **켠다** → 다음 단계에서 `-var="enable_sensitive_logging=true"`를 붙여 배포
+- **끈다** → 그대로 배포. 사용량·보안 지표는 정상 작동하고, 질문 내용 관련 지표만 빕니다
+
+기본 동작은 **이미 로그를 내보내고 있는 엔진만** 골라서 마스킹을 풀어줍니다. 즉 새로 로그가 발생하지도, 청구가 늘지도 않고, 지금 `<elided>`로 들어오던 행이 원문으로 바뀔 뿐입니다. 관측성이 꺼진 엔진은 건너뛰고 목록으로 알려줍니다.
+
+<walkthrough-footnote>아직 관측성을 한 번도 안 켠 새 앱이라면, 엔진을 직접 지정해야 이 모듈이 관측성까지 켜줍니다: <code>-var='sensitive_logging_engine_ids=["엔진ID"]'</code>. 엔진 ID는 배포 로그의 skipped 목록에 표시됩니다.</walkthrough-footnote>
+
 ## 배포 실행
 
 아래 명령이 전체 인프라를 구성합니다 — API 활성화, BigQuery 데이터셋/뷰, Log Analytics 링크, Gemini 연결·모델까지. **IAM 전파 대기 때문에 약 7분** 걸립니다.
 
 `deploy.sh`는 다음을 자동으로 처리합니다: 메타데이터 토큰 우회, `serviceusage`/`cloudresourcemanager` 부트스트랩, 이미 존재하는 리소스 import(재실행 안전), 일시적 오류 시 최대 3회 재시도.
+
+**질문·응답 원문까지 수집하려면** (앞 단계에서 "켠다"를 골랐다면):
+
+```bash
+./deploy.sh <walkthrough-project-id/> -var="enable_sensitive_logging=true"
+```
+
+**사용량·보안 지표만 원하면**:
 
 ```bash
 ./deploy.sh <walkthrough-project-id/>
@@ -57,9 +90,12 @@ gcloud billing projects link <walkthrough-project-id/> --billing-account=<ACCOUN
 
 사용자 질문의 토픽/감성 분석까지 원하면, 아래처럼 옵션 플래그를 켜서 다시 적용하세요. (Gemini 호출 비용 발생)
 
+**전제조건: 앞의 "질문·응답 원문 로깅"을 켰어야 합니다.** 분류 대상이 질문 원문이라, 마스킹 상태에서는 분류할 것이 없어 빈 결과만 나옵니다.
+
 ```bash
 terraform -chdir=terraform apply \
   -var project_id=<walkthrough-project-id/> \
+  -var enable_sensitive_logging=true \
   -var enable_content_classification=true \
   -var enable_scheduled_classification=true
 ```
@@ -94,6 +130,7 @@ terraform -chdir=terraform output -raw looker_studio_url
 
 - 데이터는 배포 시점 이후부터 누적됩니다 (forward-only)
 - 뷰는 Log Analytics 연합 조회라 **항상 최신**입니다
+- 질문·응답 원문 로깅을 껐다면 `v_user_questions`는 비어 있는 게 정상입니다. 지금이라도 켜면 **켠 시점 이후** 질문부터 쌓입니다: `./deploy.sh <walkthrough-project-id/> -var="enable_sensitive_logging=true"`
 - 정리하려면: `terraform -chdir=terraform destroy -var project_id=<walkthrough-project-id/>`
 
 자세한 내용은 <walkthrough-editor-open-file filePath="README.md">README.md</walkthrough-editor-open-file> 를 참고하세요.

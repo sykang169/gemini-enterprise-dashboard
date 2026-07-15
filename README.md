@@ -17,14 +17,31 @@ git clone https://github.com/sykang169/gemini-enterprise-dashboard.git && cd gem
 # 2) 배포 (프로젝트 소유자/편집자 권한 + 결제 활성화 필요, ~7분)
 ./deploy.sh <YOUR_PROJECT_ID>
 
+#    질문·응답 원문까지 수집하려면 (아래 경고 먼저 읽으세요 — 소급 안 됨):
+# ./deploy.sh <YOUR_PROJECT_ID> -var="enable_sensitive_logging=true"
+
 # 3) Looker Studio 대시보드 구성 (looker_studio_setup.md 가이드 따라)
 #    - 최초 1회: 뷰를 데이터 소스로 연결해 차트 배치 (섹션 0)
 #    - 이후 자동: 그 리포트를 템플릿으로 등록하면 URL 하나로 완성형 대시보드 복제
 ```
 
-`deploy.sh`가 하는 일: 결제/인증 preflight → 필요한 API 활성화 → BigQuery 데이터셋 → Log Analytics 링크 → BQ↔Gemini 연결·IAM → (IAM 전파 5분 대기 내장) → Gemini 원격 모델 → 대시보드 뷰 22개 → (옵션) 콘텐츠 분류·예약 쿼리 → **Looker Studio 구성 안내(또는 템플릿 지정 시 완성형 대시보드 복제 URL) 출력**.
+`deploy.sh`가 하는 일: 결제/인증 preflight → 필요한 API 활성화 → BigQuery 데이터셋 → Log Analytics 링크 → BQ↔Gemini 연결·IAM → (IAM 전파 5분 대기 내장) → Gemini 원격 모델 → 대시보드 뷰 23개 → (옵션) 콘텐츠 분류·예약 쿼리 → **Looker Studio 구성 안내(또는 템플릿 지정 시 완성형 대시보드 복제 URL) 출력**.
 
 > **Looker Studio 자동 생성:** Looker Studio는 차트를 코드로 맨바닥에서 만드는 API가 없어, 완성형 대시보드는 **템플릿 리포트 복제** 방식으로 자동화합니다. `looker_studio_setup.md` 섹션 0을 따라 한 번 템플릿을 만들고 `-var="looker_studio_template_report_id=<REPORT_ID>"`로 배포하면, 이후 어떤 프로젝트든 완성형 대시보드를 한 URL로 복제 생성합니다.
+
+> ### ⚠️ 질문·응답 원문을 보려면 배포 **전에** 결정하세요 (`enable_sensitive_logging`)
+>
+> Gemini Enterprise는 기본적으로 로그의 민감 필드를 `<elided>`로 마스킹합니다. 이 플래그 없이 배포하면 **질문·응답·사용자ID가 전부 가려진 채 쌓이고**, `v_user_questions`는 비어 보이며 `v_queries_per_user`·`v_daily_active_users`는 사용자 1명으로 붕괴하고 콘텐츠 분류는 분류할 텍스트가 없습니다.
+>
+> **소급이 안 됩니다.** 나중에 켜도 그 전 로그는 영구히 마스킹 상태입니다.
+>
+> ```bash
+> ./deploy.sh <YOUR_PROJECT_ID> -var="enable_sensitive_logging=true"
+> ```
+>
+> 기본 동작(AUTO)은 **이미 로그를 내보내는 엔진만** 골라 마스킹을 풀어, 새 로그 발생·추가 청구 없이 기존 행만 원문화합니다. 관측성이 꺼진 엔진은 건너뛰고 목록으로 알려줍니다 — 그런 새 앱은 `-var='sensitive_logging_engine_ids=["ENGINE_ID"]'`로 지정하면 관측성까지 켜줍니다.
+>
+> **켜면 최종 사용자 프롬프트와 신원이 평문으로** Cloud Logging에 기록되고 BigQuery로 복사됩니다. 실제 PII이므로 `gemini_ent_analytics`·`gemini_ent_dashboard` 데이터셋 IAM을 열람 권한자로 제한하세요. 되돌리기는 수동입니다 — 자세한 내용은 `terraform/sensitive_logging.tf` 주석 참고.
 
 ---
 
@@ -37,7 +54,7 @@ git clone https://github.com/sykang169/gemini-enterprise-dashboard.git && cd gem
 [_Default 로그 버킷 (Log Analytics 켜짐, 90일 보관)]
         │  federated (복사 없음, BigQuery 저장비 0)
         ▼
-[gemini_ent_analytics._AllLogs]  ── SQL 뷰 22개 ──▶ [Looker Studio (무료)]
+[gemini_ent_analytics._AllLogs]  ── SQL 뷰 23개 ──▶ [Looker Studio (무료)]
         │
         └─ (옵션) Model Armor 프롬프트 원문
              └─ BigQuery + Gemini(gemini-2.5-flash-lite) 분류
@@ -48,7 +65,7 @@ git clone https://github.com/sykang169/gemini-enterprise-dashboard.git && cd gem
 
 ---
 
-## 대시보드 지표 (22개 뷰)
+## 대시보드 지표 (23개 뷰)
 
 | 그룹 | 내용 | 내장 대비 |
 |------|------|-----------|
@@ -57,7 +74,7 @@ git clone https://github.com/sykang169/gemini-enterprise-dashboard.git && cd gem
 | **⚡ 지연** | 응답 p50/p95 (trace 기반), 사용자·에이전트별 | **없음** |
 | **📚 품질** | 그라운딩 커버리지(할루시네이션 리스크), 인용 출처 Top | **없음** |
 | **🧠 콘텐츠** | 질문 토픽 분포, 의도, 감성(부정 급증 경보) — Gemini 분류 | **없음** |
-| **👤 사용자** | 행 단위 드릴다운(user_id 필터) | 제한적 |
+| **👤 사용자** | 행 단위 드릴다운(user_id 필터), **질문 원문 검색**(`v_user_questions`) | 제한적 |
 
 ---
 
@@ -72,7 +89,7 @@ git clone https://github.com/sykang169/gemini-enterprise-dashboard.git && cd gem
 ├── looker_studio_create_url.txt  # 템플릿 복제 URL (생성물, 템플릿 지정 시에만)
 ├── log_analytics_dashboard_queries.sql  # 원본 KPI 쿼리 모음
 ├── sql/
-│   ├── 01_create_views.sql       # 뷰 22개 정의
+│   ├── 01_create_views.sql       # 뷰 20개 정의
 │   └── 02_content_classification.sql  # Gemini 콘텐츠 분류 (옵션)
 ├── notebook/
 │   └── gemini_enterprise_dashboard_setup.ipynb  # Python 대안 경로

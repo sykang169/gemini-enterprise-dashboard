@@ -8,7 +8,7 @@
 ## 🚀 원큐 배포 (TL;DR)
 
 **신규/빈 프로젝트에서도** 아래 명령 **1개**로 전체 구성(API 활성화 → 데이터셋 → Log Analytics
-연동 → 커넥션/IAM → 원격 모델 → 19개 뷰 → Looker Studio URL)이 끝까지 완료됩니다.
+연동 → 커넥션/IAM → 원격 모델 → 20개 뷰 → Looker Studio URL)이 끝까지 완료됩니다.
 
 ```bash
 ./deploy.sh <YOUR_PROJECT_ID>
@@ -29,7 +29,7 @@
 
 ```
 sql/
-  01_create_views.sql          # 19개 v_* 뷰 정의 (bq show --view 로 라이브 환경에서 추출·통합)
+  01_create_views.sql          # 20개 v_* 뷰 정의 (bq show --view 로 라이브 환경에서 추출·통합)
   02_content_classification.sql # ② 콘텐츠 분류 (기존 파일, 미변경 — 옵트인/비용 유발)
 
 terraform/
@@ -191,7 +191,7 @@ API는 더 이상 수동으로 미리 활성화할 필요가 없습니다 — `t
 
 ## 검증 상태
 
-- `sql/01_create_views.sql`: 19개 뷰 전부 `bq show --view --format=prettyjson`으로 추출, 대상 프로젝트/데이터셋
+- `sql/01_create_views.sql`: 20개 뷰 전부 `bq show --view --format=prettyjson`으로 추출, 대상 프로젝트/데이터셋
   일치 확인.
 - `terraform/*.tf`: `terraform fmt -check -diff -recursive` 통과 (문법/스타일 정상, `apis.tf`/`scheduled_query.tf`/
   `outputs.tf`의 `for`/`flatten` 표현식, `model_and_views.tf`의 중첩 `replace()` 표현식 포함).

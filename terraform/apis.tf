@@ -19,6 +19,7 @@ resource "google_project_service" "apis" {
     "logging.googleapis.com",              # Cloud Logging + Log Analytics
     "aiplatform.googleapis.com",           # Vertex AI (Gemini endpoint called by the remote model)
     "bigquerydatatransfer.googleapis.com", # BigQuery Data Transfer Service (scheduled queries)
+    "discoveryengine.googleapis.com",      # Gemini Enterprise engines (observabilityConfig PATCH, see sensitive_logging.tf)
   ])
 
   project            = var.project_id

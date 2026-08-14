@@ -446,7 +446,14 @@ ga AS (
     MAX(JSON_VALUE(resource.labels,'$.agent_id')) agent_id,
     MAX(IF(JSON_VALUE(labels,'$."event.name"')='gen_ai.user.message',timestamp,NULL)) req_ts,
     MAX(IF(JSON_VALUE(labels,'$."event.name"')='gen_ai.choice',timestamp,NULL)) resp_ts
-  FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.v_log_source` WHERE log_name LIKE '%2Fgen_ai%' AND trace IS NOT NULL GROUP BY trace )
+  -- The two log names are spelled out rather than matched with '%2Fgen_ai%'.
+  -- That wildcard also catches gen_ai.client.inference.operation.details, the
+  -- token log added below, whose event.name is neither user.message nor
+  -- choice: such a trace contributes req_ts=NULL and resp_ts=NULL, so it would
+  -- enter this view as a row with a NULL day and a NULL latency, inflating
+  -- `turns` on a chart that cannot show when it happened.
+  FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.v_log_source`
+  WHERE (log_name LIKE '%gen_ai.user.message' OR log_name LIKE '%gen_ai.choice') AND trace IS NOT NULL GROUP BY trace )
 SELECT TIMESTAMP_TRUNC(COALESCE(ga.req_ts,ga.resp_ts),DAY) AS day,
   ua.user_id, ga.agent_id,
   COUNT(*) AS turns,
@@ -579,4 +586,159 @@ SELECT
 FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.v_log_source`
 WHERE log_name LIKE '%gemini_enterprise_user_activity'
   AND JSON_VALUE(json_payload,'$.logMetadata.methodName') = 'Search'
+;
+
+-- =====================================================================
+-- TOKEN USAGE
+-- =====================================================================
+-- Source: discoveryengine.googleapis.com/gen_ai.client.inference.operation
+-- .details -- one entry per LLM call the assistant makes, carrying
+--   gen_ai.usage.input_tokens
+--   gen_ai.usage.output_tokens
+--   gen_ai.usage.cache_read.input_tokens
+-- plus the prompt/response text and resource.labels.{engine_id,agent_id}.
+--
+-- DOES YOUR DEPLOYMENT HAVE IT? Not every Gemini Enterprise version emits this
+-- log; older ones emit the gen_ai.user.message / gen_ai.choice pair instead,
+-- which carries no token counts. Check with:
+--
+--   gcloud logging read 'logName:"gen_ai.client.inference.operation.details"' \
+--     --project=YOUR_PROJECT_ID --limit=1 --freshness=7d
+--
+-- If that returns nothing after a real assistant turn, these two views are
+-- simply empty and nothing else breaks. There is no setting to turn it on
+-- beyond observability + sensitive logging.
+--
+-- WHY NOT CLOUD TRACE. The same counts appear as span attributes on
+-- `generate_content` spans (verified identical: 6,127 in / 67 out in both).
+-- Trace additionally carries gen_ai.request.model, which the log does NOT --
+-- so per-model cost splits need Trace. But Trace keeps 30 days, has no
+-- BigQuery export, and is only reachable by polling its API, whereas this log
+-- flows into _AllLogs and through the archive like every other source. Logs
+-- win for a dashboard; reach for Trace only if you need the model name.
+--
+-- WHAT THESE NUMBERS ARE NOT
+-- --------------------------
+-- 1. NOT a complete bill. A turn blocked by Model Armor emits NO inference
+--    entry at all, even though generation ran and burned tokens: verified
+--    2026-08-14, a logic-puzzle prompt tripped the pi_and_jailbreak filter,
+--    user_activity recorded answer.state=SKIPPED with
+--    assistSkippedReasons=[CUSTOMER_POLICY_VIOLATION] and partial generated
+--    text, and no token row was ever written. Cross-read
+--    v_model_armor_verdict_daily before treating a total as spend.
+-- 2. NOT charged to callers who hang up. Aborting the response stream leaves
+--    the span/entry with input_tokens=0 and no output_tokens.
+-- 3. NOT Search. Search does no generation, so it has no token rows. On a
+--    Search-dominated deployment these views will look far too quiet next to
+--    v_daily_queries -- that is correct, not a gap.
+-- 4. NOT split by reasoning. The OpenTelemetry field for it,
+--    gen_ai.usage.reasoning.output_tokens, does exist -- this project's
+--    self-hosted ADK agents emit it, and there output_tokens INCLUDES it
+--    (measured: 194 output = 25 visible + 169 reasoning, with the child
+--    generate_content span reporting only the 25; summing both spans would
+--    double-count). Gemini Enterprise's core_assistant does not emit the
+--    field, including on a deliberately reasoning-heavy prompt that produced
+--    585 output tokens, so thinking tokens cannot be separated out here. They
+--    are billed as output either way, so totals stay usable; per-turn
+--    "how much of this was thinking" does not.
+--
+-- CACHED INPUT IS A SUBSET OF INPUT, NOT AN EXTRA. Across four live turns
+-- cache_read stayed pinned to the same value while input moved
+-- (6135/6127/6162 with cache 3993; 9814 with cache 7889 on a different
+-- session) -- the constant is the cached system prompt and tool definitions,
+-- counted inside input_tokens. So total = input + output, and cached must
+-- never be added on top. It is broken out because cached input is billed at a
+-- discount, not free: uncached_input_tokens is the full-rate portion, and the
+-- real bill sits between it and input_tokens. Do not present either as the
+-- cost.
+-- ---------------------------------------------------------------------
+
+-- ---------------------------------------------------------------------
+-- v_token_usage_daily
+--   Volume trend. Per day / app / assistant, no user identity, so it is
+--   safe on a broadly-shared report while v_token_usage_by_user is not.
+-- ---------------------------------------------------------------------
+CREATE OR REPLACE VIEW `YOUR_PROJECT_ID.gemini_ent_dashboard.v_token_usage_daily` AS
+SELECT
+  TIMESTAMP_TRUNC(timestamp, DAY) AS day,
+  JSON_VALUE(resource.labels,'$.engine_id') AS engine_id,
+  -- Names the ASSISTANT, not the agent the user picked -- it is 'core_assistant'
+  -- for all ordinary chat. Same caveat as v_agent_usage_daily; do not read it
+  -- as a per-custom-agent breakdown.
+  JSON_VALUE(resource.labels,'$.agent_id') AS agent_id,
+  COUNT(*) AS llm_calls,
+  SUM(SAFE_CAST(JSON_VALUE(json_payload,'$."gen_ai.usage.input_tokens"') AS INT64)) AS input_tokens,
+  SUM(SAFE_CAST(JSON_VALUE(json_payload,'$."gen_ai.usage.cache_read.input_tokens"') AS INT64)) AS cached_input_tokens,
+  SUM(SAFE_CAST(JSON_VALUE(json_payload,'$."gen_ai.usage.input_tokens"') AS INT64)
+      - COALESCE(SAFE_CAST(JSON_VALUE(json_payload,'$."gen_ai.usage.cache_read.input_tokens"') AS INT64), 0)) AS uncached_input_tokens,
+  SUM(SAFE_CAST(JSON_VALUE(json_payload,'$."gen_ai.usage.output_tokens"') AS INT64)) AS output_tokens,
+  SUM(SAFE_CAST(JSON_VALUE(json_payload,'$."gen_ai.usage.input_tokens"') AS INT64)
+      + COALESCE(SAFE_CAST(JSON_VALUE(json_payload,'$."gen_ai.usage.output_tokens"') AS INT64), 0)) AS total_tokens
+FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.v_log_source`
+WHERE log_name LIKE '%gen_ai.client.inference.operation.details'
+GROUP BY day, engine_id, agent_id
+;
+
+-- ---------------------------------------------------------------------
+-- v_token_usage_by_user
+--   Who spent the tokens. Joined to user_activity on `trace`.
+--
+--   THE JOIN IS NOT OPTIONAL. The inference entry carries a `user.id` field
+--   that looks like the answer and is not: it is the literal string "user" on
+--   every row, for API callers and real people alike. Identity only exists on
+--   the user_activity side, as userIamPrincipal, and `trace` is what ties the
+--   two together -- verified end to end on 2026-08-14, when a chat message
+--   typed into the Gemini Enterprise UI produced trace
+--   999f29cde8b8230a6fcbf00b11fa0cd1 on both the inference entry (9,814 in /
+--   58 out / 7,889 cached) and a StreamAssist user_activity row bearing the
+--   real signed-in address.
+--
+--   The join is LEFT, so a token row whose user_activity partner has not
+--   landed yet (they are written seconds apart) shows as user_id = NULL
+--   rather than vanishing from the totals. If NULLs persist across a whole
+--   day, the archive is picking up one log name and not the other -- check
+--   sql/03's filter, not this view.
+--
+--   REQUIRES sensitive logging, exactly like v_user_questions: without
+--   observabilityConfig.sensitiveLoggingEnabled, userIamPrincipal is the
+--   literal "<elided>" and every user collapses into one row. The token
+--   counts stay correct; only the attribution is lost.
+--   PRIVACY: identifies individuals and their consumption -- restrict report
+--   sharing and dataset IAM.
+-- ---------------------------------------------------------------------
+CREATE OR REPLACE VIEW `YOUR_PROJECT_ID.gemini_ent_dashboard.v_token_usage_by_user` AS
+WITH tok AS (
+  SELECT trace, timestamp,
+    JSON_VALUE(resource.labels,'$.engine_id') AS engine_id,
+    JSON_VALUE(resource.labels,'$.agent_id') AS agent_id,
+    SAFE_CAST(JSON_VALUE(json_payload,'$."gen_ai.usage.input_tokens"') AS INT64) AS in_tok,
+    SAFE_CAST(JSON_VALUE(json_payload,'$."gen_ai.usage.output_tokens"') AS INT64) AS out_tok,
+    SAFE_CAST(JSON_VALUE(json_payload,'$."gen_ai.usage.cache_read.input_tokens"') AS INT64) AS cache_tok
+  FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.v_log_source`
+  WHERE log_name LIKE '%gen_ai.client.inference.operation.details' AND trace IS NOT NULL ),
+ua AS (
+  -- One row per trace. A StreamAssist turn logs a single user_activity entry,
+  -- but the same trace can also carry a ModelArmorAudit entry, so this is
+  -- aggregated rather than selected DISTINCT -- otherwise the join would
+  -- multiply the token counts by however many audit rows rode along.
+  SELECT trace, MAX(JSON_VALUE(json_payload,'$.userIamPrincipal')) AS user_id
+  FROM `YOUR_PROJECT_ID.gemini_ent_dashboard.v_log_source`
+  WHERE log_name LIKE '%gemini_enterprise_user_activity'
+    AND JSON_VALUE(json_payload,'$.logMetadata.methodName') = 'StreamAssist'
+    AND trace IS NOT NULL
+  GROUP BY trace )
+SELECT
+  TIMESTAMP_TRUNC(tok.timestamp, DAY) AS day,
+  ua.user_id,
+  tok.engine_id,
+  tok.agent_id,
+  COUNT(*) AS llm_calls,
+  COUNT(DISTINCT tok.trace) AS turns,
+  SUM(tok.in_tok) AS input_tokens,
+  SUM(tok.cache_tok) AS cached_input_tokens,
+  SUM(tok.in_tok - COALESCE(tok.cache_tok, 0)) AS uncached_input_tokens,
+  SUM(tok.out_tok) AS output_tokens,
+  SUM(tok.in_tok + COALESCE(tok.out_tok, 0)) AS total_tokens
+FROM tok LEFT JOIN ua USING (trace)
+GROUP BY day, user_id, engine_id, agent_id
 ;

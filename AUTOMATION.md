@@ -8,7 +8,7 @@
 ## 🚀 원큐 배포 (TL;DR)
 
 **신규/빈 프로젝트에서도** 아래 명령 **1개**로 전체 구성(API 활성화 → 데이터셋 → Log Analytics
-연동 → 커넥션/IAM → 원격 모델 → 23개 뷰 → Looker Studio URL)이 끝까지 완료됩니다.
+연동 → 커넥션/IAM → 원격 모델 → 26개 뷰 → Looker Studio URL)이 끝까지 완료됩니다.
 state는 로컬이 아니라 `gs://<PROJECT_ID>-tfstate`에 저장되므로(`backend.tf`) 다른 PC에서
 같은 프로젝트에 재배포해도 변경분만 반영됩니다.
 
@@ -37,7 +37,7 @@ state는 로컬이 아니라 `gs://<PROJECT_ID>-tfstate`에 저장되므로(`bac
 
 ```
 sql/
-  01_create_views.sql          # 23개 뷰: 지표 뷰 21개 + v_log_source(차트용, 90일 윈도우)
+  01_create_views.sql          # 26개 뷰: 지표 뷰 24개 + v_log_source(차트용, 90일 윈도우)
                                #          + v_log_source_all(ad-hoc, 무제한). t_logs_archive 도 여기서 생성
   02_content_classification.sql # ② 콘텐츠 분류 (옵트인/비용 유발)
   03_archive_logs.sql          # ③ 로그 아카이브 — _AllLogs → t_logs_archive 증분 MERGE (옵트인)

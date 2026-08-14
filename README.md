@@ -150,7 +150,7 @@ git clone https://github.com/sykang169/gemini-enterprise-dashboard.git && cd gem
 ├── looker_studio_create_url.txt  # 템플릿 복제 URL (생성물, 템플릿 지정 시에만)
 ├── log_analytics_dashboard_queries.sql  # 원본 KPI 쿼리 모음
 ├── sql/
-│   ├── 01_create_views.sql       # 뷰 23개: 지표 21개 + v_log_source(차트용) + v_log_source_all(ad-hoc)
+│   ├── 01_create_views.sql       # 뷰 26개: 지표 24개 + v_log_source(차트용) + v_log_source_all(ad-hoc)
 │   ├── 02_content_classification.sql  # Gemini 콘텐츠 분류 (옵션)
 │   └── 03_archive_logs.sql       # 로그 아카이브 증분 MERGE (옵션)
 ├── notebook/

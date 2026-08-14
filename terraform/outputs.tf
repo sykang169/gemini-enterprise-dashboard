@@ -52,6 +52,7 @@ locals {
     "v_grounding_coverage_daily", "v_user_activity_detail",
     "v_model_armor_by_client", "v_user_agent_trace",
     "v_model_armor_verdict_daily",
+    "v_token_usage_daily", "v_token_usage_by_user",
   ]
 
   # Template-clone deep link. Looker Studio has no API to create charts, so a

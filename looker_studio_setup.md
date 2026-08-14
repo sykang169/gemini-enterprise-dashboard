@@ -166,6 +166,21 @@ BigQuery+Gemini로 사용자 질문을 분류한 결과. 원문은 저장 안 �
 - ⚠️ **전제조건 — 민감 로깅 활성화 필수**: 엔진의 `observabilityConfig.sensitiveLoggingEnabled=true`여야 원문·사용자ID가 평문으로 기록됨. 꺼져 있으면 둘 다 `<elided>`(8자)로 마스킹돼 이 표가 비어 보임. **소급 안 됨** — 켠 시점 이후 로그만 원문. (설정: discoveryengine API `engines/{APP}` PATCH `observabilityConfig.sensitiveLoggingEnabled`)
 - ⚠️ **프라이버시 주의**: 이 표는 **질문 원문 + 사용자 신원을 그대로 노출**합니다(A-8 분류 지표와 달리). 보고서 **공유 범위를 관리자/제한된 뷰어로 한정**하고 데이터셋 IAM을 조이세요. 필요 시 별도 페이지로 분리해 접근을 통제.
 
+### A-10. 🪙 토큰 사용량 (누가 얼마나 소모했나 — 내장 애널리틱스에 없음)
+GE 내장 애널리틱스에도, Cloud Billing에도 토큰 지표는 없습니다(GE는 시트 과금). 유일한 출처가 `gen_ai.client.inference.operation.details` 로그입니다.
+- **일별 추이**: 차트=콤보(Combo chart), 소스=`v_token_usage_daily`, 기간 측정기준 → X축=`day`, 막대=`input_tokens`/`output_tokens`(SUM), 선=`llm_calls`
+- **사용자 Top N**: 차트=가로 막대(Bar), 소스=`v_token_usage_by_user`, 측정기준=`user_id`, 측정항목=`total_tokens`(SUM), 정렬 내림차순 → 헤비 유저 식별
+- **캐시 효율**: 스코어카드, 소스=`v_token_usage_daily`, 계산필드 `SUM(cached_input_tokens)/SUM(input_tokens)` → 형식 백분율
+- 📖 **수치 읽기**: `cached_input_tokens`는 `input_tokens`에 **포함된 부분집합**입니다(시스템 프롬프트·툴 정의 캐시분). **절대 더하지 마세요** — 총합은 `total_tokens`(= input + output). 캐시분은 무료가 아니라 **할인 단가**라, 실제 비용은 `uncached_input_tokens`와 `input_tokens` 사이 어딘가입니다. 둘 중 어느 쪽도 "비용"으로 표기하지 마세요.
+- ⚠️ **집계에서 빠지는 것 3가지** (총합을 청구액처럼 읽으면 안 되는 이유):
+  1. **Model Armor 차단 턴은 토큰 행이 아예 안 남습니다.** 생성이 돌다 끊긴 것이라 토큰은 실제로 소모됐는데도 0으로 잡힙니다 → `v_model_armor_verdict_daily`의 `blocked`와 나란히 두고 읽으세요.
+  2. **응답 스트림을 중간에 끊으면** `input_tokens=0`으로 기록됩니다(API 클라이언트 조기 종료 시).
+  3. **Search는 LLM 생성이 없어** 토큰 행이 없습니다. Search 위주 배포에서는 `v_daily_queries`보다 훨씬 조용하게 보이는 게 정상입니다.
+- 💡 **모델명은 없습니다.** 로그에는 모델이 안 실립니다(Cloud Trace의 `generate_content` span에만 `gen_ai.request.model`이 있음). 모델별 단가 분해가 필요하면 Trace API를 별도로 수집해야 하고, Trace는 **보존 30일 + BQ 익스포트 없음**입니다.
+- 💡 **추론(thinking) 토큰은 분리 안 됩니다.** GE는 `gen_ai.usage.reasoning.output_tokens`를 내보내지 않습니다(추론 유도 질문에서도 미출현). 어차피 출력 토큰으로 과금되므로 총량은 정확하지만, "이 중 얼마가 사고였나"는 알 수 없습니다.
+- ⚠️ **전제조건**: `v_token_usage_by_user`의 사용자 귀속은 A-9와 동일하게 **민감 로깅 필수**입니다. 꺼져 있으면 토큰 수치는 맞되 `user_id`가 전부 `<elided>` 한 명으로 뭉칩니다. (로그 자체의 `user.id` 필드는 모든 행이 리터럴 `"user"`라 쓸 수 없어, `trace`로 user_activity와 조인해 신원을 붙입니다.)
+- ⚠️ **프라이버시**: 개인별 소모량은 인사평가로 오용되기 쉽습니다. A-9와 같은 제한 페이지에 두세요.
+
 ---
 
 ## 섹션 A 권장 페이지 레이아웃 (Page 1 — 대시보드 첫 화면)

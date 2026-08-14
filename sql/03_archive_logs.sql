@@ -27,6 +27,11 @@
 --   gen_ai (latency, agents)       2,927      7.0 MB  YES
 --   user_activity (core signal)    369        1.4 MB  YES
 --   api_errors                     4          ~0      YES
+--   gen_ai.client.inference...     ~1/turn   ~0       YES - token counts
+--
+-- The last row is one entry per LLM call, carrying the prompt/response text,
+-- so its size tracks assistant traffic -- the same order as user_activity,
+-- nowhere near the Model Armor firehose.
 --
 -- Filtering this way turns a 20.6 GB/38d archive into ~11 MB/38d — the storage
 -- cost rounds to zero — while keeping every row any dashboard view consumes.
@@ -134,6 +139,12 @@ USING (
       log_name LIKE "%gemini_enterprise_user_activity"
       OR log_name LIKE "%gen_ai.user.message"
       OR log_name LIKE "%gen_ai.choice"
+      -- Token usage. This is the ONLY place token counts are durable: they
+      -- exist nowhere else in Cloud Logging, and the copy in Cloud Trace is
+      -- deleted after 30 days with no export path. Miss this log name here and
+      -- the token views go permanently blank once bucket retention rolls over,
+      -- with nothing to backfill from. See v_token_usage_daily in sql/01.
+      OR log_name LIKE "%gen_ai.client.inference.operation.details"
       OR log_name LIKE "%api_errors"
       -- Model Armor: real end-user prompts only. See the header — VERTEX_AI
       -- rows are this dashboard's own classification traffic.

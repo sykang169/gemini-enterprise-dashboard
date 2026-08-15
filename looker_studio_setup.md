@@ -168,6 +168,7 @@ BigQuery+Gemini로 사용자 질문을 분류한 결과. 원문은 저장 안 �
 
 ### A-10. 🪙 토큰 사용량 (누가 얼마나 소모했나 — 내장 애널리틱스에 없음)
 GE 내장 애널리틱스에도, Cloud Billing에도 토큰 지표는 없습니다(GE는 시트 과금). 유일한 출처가 `gen_ai.client.inference.operation.details` 로그입니다.
+> 👉 **클릭 단위 배치 순서는 아래 [토큰 3종 클릭 단위](#토큰-3종-클릭-단위--a-10-배치-스코어카드--콤보--top-n) 참고** (축 스케일·누적 막대 함정 포함).
 - **일별 추이**: 차트=콤보(Combo chart), 소스=`v_token_usage_daily`, 기간 측정기준 → X축=`day`, 막대=`input_tokens`/`output_tokens`(SUM), 선=`llm_calls`
 - **사용자 Top N**: 차트=가로 막대(Bar), 소스=`v_token_usage_by_user`, 측정기준=`user_id`, 측정항목=`total_tokens`(SUM), 정렬 내림차순 → 헤비 유저 식별
 - **캐시 효율**: 스코어카드, 소스=`v_token_usage_daily`, 계산필드 `SUM(cached_input_tokens)/SUM(input_tokens)` → 형식 백분율
@@ -212,6 +213,8 @@ GE 내장 애널리틱스에도, Cloud Billing에도 토큰 지표는 없습니�
 Page 2(운영 지표)는 아래 **섹션 B → 권장 페이지 레이아웃** 참고. 두 페이지 구성을 권장합니다.
 
 > **A-9 질문 원문 검색 표**는 원문 노출 위험 때문에 위 대시보드 첫 화면에 넣지 말고 **별도 페이지(예: "질문 로그")로 분리**해 접근을 통제하는 걸 권장합니다.
+>
+> **A-10 토큰**은 둘로 나눠 배치하세요: 신원이 없는 **일별 추이 콤보 + 스코어카드(`v_token_usage_daily`)는 Page 1**에 올려도 되고, **사용자별 Top N(`v_token_usage_by_user`)은 A-9와 같은 제한 페이지**로 — 개인별 소모량은 인사평가로 오용되기 쉽습니다.
 
 ---
 
@@ -243,6 +246,8 @@ Page 2(운영 지표)는 아래 **섹션 B → 권장 페이지 레이아웃** �
 | 사용자당 쿼리(전체) | `v_daily_active_users` | `SUM(queries)/SUM(active_users)` | 숫자 |
 | 프롬프트 인젝션율 | `v_model_armor_verdict_daily` | `SUM(injection_attempts)/SUM(checks)` | 백분율 |
 | 부정감성 비율 | `v_sentiment_daily` (분류 옵션 시) | `SUM(negative)/(SUM(negative)+SUM(neutral)+SUM(positive))` | 백분율 |
+| 캐시 적중률(입력 중) | `v_token_usage_daily` | `SUM(cached_input_tokens)/SUM(input_tokens)` | 백분율 |
+| 턴당 평균 토큰 | `v_token_usage_daily` | `SUM(total_tokens)/SUM(llm_calls)` | 숫자 |
 
 **⚠️ p95 지연 스코어카드**: 백분위수(p95)는 **여러 날을 평균/합산하면 통계적으로 틀립니다.** 두 방법 중 택:
 - `MAX(p95_sec)` → "최악일 p95"(보수적 SLO 지표, 정확). **권장.**
@@ -343,6 +348,50 @@ Page 2(운영 지표)는 아래 **섹션 B → 권장 페이지 레이아웃** �
 1. **삽입 → 원형 차트(Pie)** → 소스 `v_model_armor_threats_long`.
 2. **측정기준(Dimension)** = `threat_type`, **측정항목(Metric)** = `threat_count`(SUM).
 3. 정렬 `threat_count` 내림차순. 기간 컨트롤 연동 원하면 `day`가 있으니 그대로 반응.
+
+### 토큰 3종 클릭 단위 — A-10 배치 (스코어카드 → 콤보 → Top N)
+
+스펙은 A-10, 여기는 클릭 순서입니다. 축 스케일과 누적 막대에서 실수가 잦아 따로 뺐습니다.
+
+**0) 데이터 소스 연결 (최초 1회)**
+1. `데이터 추가 → BigQuery → 프로젝트 → gemini_ent_dashboard` → **`v_token_usage_daily`** 추가.
+2. 같은 방법으로 **`v_token_usage_by_user`** 추가.
+3. 각 소스의 **별칭(Alias)을 뷰 이름 그대로** 두세요(템플릿 자동 복제 조건 — 아래 체크리스트).
+4. 소스 편집에서 `day` 필드 유형이 **날짜/시간**인지 확인. 아니면 기간 컨트롤이 안 먹습니다.
+
+**1) 스코어카드 3장 — "총 입력 / 총 출력 / 캐시 적중률"**
+1. **삽입 → 스코어카드** → 소스 `v_token_usage_daily`, 측정항목 `input_tokens`(**SUM**) → 라벨 "총 입력 토큰".
+2. 복제(Ctrl+D) → 측정항목만 `output_tokens`(SUM) → "총 출력 토큰".
+3. 복제 → 측정항목 클릭 → **필드 만들기**: 이름 `캐시 적중률(입력 중)`, 수식 `SUM(cached_input_tokens)/SUM(input_tokens)`, 형식 **백분율**. 집계는 **Auto 그대로**(이미 집계식).
+4. ⚠️ **`cached_input_tokens`를 "총 캐시 토큰" 타일로 따로 두지 마세요.** 입력에 포함된 부분집합이라 세 숫자를 나란히 두면 보는 사람이 더합니다. 반드시 **비율**로만 노출하고 라벨에 "(입력 중)"을 남기세요.
+5. 총량 타일이 필요하면 `total_tokens`(SUM) 하나만 — 이건 행별 `input+output`이라 그냥 더해도 맞습니다.
+
+**2) 콤보 — 일별 추이**
+1. **삽입 → 콤보 차트** → 소스 `v_token_usage_daily`.
+2. **기간 측정기준 → X축** = `day`, **측정기준** = `day`. (분류 측정기준 비움)
+3. **측정항목 3개**: `input_tokens`(SUM) / `output_tokens`(SUM) / `llm_calls`(SUM).
+4. **스타일 탭 → 시리즈**:
+   - #1 `input_tokens` = **막대**, 축 **왼쪽**
+   - #2 `output_tokens` = **막대**, 축 **왼쪽**
+   - #3 `llm_calls` = **선**, 축 **오른쪽**
+5. ⚠️ **출력 막대가 안 보이는 게 정상입니다.** 실측에서 입력 39,594 : 출력 1,354 로 **~29배** 차이가 납니다(시스템 프롬프트+툴 정의가 매 턴 입력에 실려서). 셋 중 택:
+   - **(권장)** `output_tokens`를 **선 + 오른쪽 축**으로 옮기고, 오른쪽 축에 `llm_calls`와 같이 두기
+   - 또는 출력 전용 차트를 옆에 하나 더 두기
+   - 또는 스타일 탭에서 왼쪽 축 **로그 스케일**
+6. 💡 **입력 구성을 보고 싶으면 누적 막대**: 측정항목을 `uncached_input_tokens` + `cached_input_tokens` 두 개로 하고 스타일에서 **누적(Stacked)** → 합이 정확히 `input_tokens`가 됩니다. **`input_tokens`와 `cached_input_tokens`를 같이 누적하면 이중계산**이니 섞지 마세요.
+
+**3) 가로 막대 — 사용자 Top N**
+1. **삽입 → 가로 막대(Bar)** → 소스 **`v_token_usage_by_user`**.
+2. **측정기준** = `user_id`, **측정항목** = `total_tokens`(SUM).
+3. Setup에서 **정렬** = `total_tokens` **내림차순**, **행 수(Rows per page)** = 10.
+4. 💡 `user_id`가 **(null)** 인 막대가 보이면 버그가 아닙니다 — 토큰 로그와 user_activity 로그가 몇 초 차이로 기록돼 아직 짝이 안 붙은 최신 턴입니다. 거슬리면 차트 필터로 `user_id` **Is not null**. 다만 **하루 종일 null이면** 아카이브가 한쪽 로그만 담고 있다는 신호이니 `sql/03` 필터를 확인하세요.
+5. (선택) 표(Table)를 하나 더 두고 측정기준 `user_id`+`agent_id`, 측정항목 `turns`/`total_tokens` → 사용자×에이전트 상세.
+6. ⚠️ 이 차트는 **개인별 소모량**입니다. A-9(질문 원문)와 **같은 제한 페이지**에 두고 공유 범위를 조이세요.
+
+**4) 마무리**
+1. 페이지 상단에 **기간 컨트롤** 배치 → 세 차트가 `day`로 함께 필터됩니다.
+2. 가로 막대에 **설정 → 차트 상호작용 → "필터 적용"** 체크 → 사용자 클릭 시 같은 페이지 토큰 차트가 그 사용자로 좁혀집니다(`user_id`를 가진 소스에만 걸림).
+3. **차트가 전부 비어 보이면** 데이터가 없는 것과 배포가 이 로그를 안 내보내는 것 두 경우입니다 — A-10의 전제조건과 `sql/01` 주석의 `gcloud logging read` 확인 명령을 보세요. 이 로그는 **소급이 안 되므로**, 켠 시점 이전 구간을 기간 컨트롤로 잡으면 당연히 빕니다.
 
 ---
 

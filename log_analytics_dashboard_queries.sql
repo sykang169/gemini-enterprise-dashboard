@@ -11,7 +11,8 @@
 --     ※ 링크된 데이터셋 이름을 여기 쓰면
 --       "FROM clause must contain exactly one log view" 오류가 납니다.
 --     ※ Log Analytics 는 FROM 에 로그 뷰 1개만 허용합니다 —
---       13) 처럼 뷰를 두 번 참조하는 CTE 조인은 BigQuery 쪽에서 실행하세요.
+--       13) 처럼 뷰를 두 번 참조하는 CTE 조인은 이름만 바꿔도 같은 오류가 납니다.
+--       BigQuery 쪽에서 실행하거나, 단일 스캔으로 다시 쓴 13-LA) 를 쓰세요.
 --
 -- 사용법:
 --   Cloud Console → Logging → Log Analytics → 아래 쿼리 실행 →
@@ -247,6 +248,8 @@ ORDER BY day;
 -- 신원은 user_activity 쪽 userIamPrincipal 에만 있고, 두 로그는 `trace` 로 이어집니다.
 -- 전제조건: 엔진에 observabilityConfig.sensitiveLoggingEnabled = true
 --           (꺼져 있으면 토큰 수치는 맞되 user_id 가 전부 '<elided>' 한 명으로 뭉칩니다)
+-- ※ 이 쿼리는 뷰를 두 번 참조하므로 BigQuery 전용입니다.
+--   Log Analytics 콘솔에서는 아래 13-LA) 를 쓰세요.
 WITH tok AS (
   SELECT trace,
     SAFE_CAST(JSON_VALUE(json_payload,'$."gen_ai.usage.input_tokens"')  AS INT64) AS in_tok,
@@ -274,5 +277,46 @@ SELECT
   SUM(tok.out_tok) AS output_tokens,
   SUM(tok.in_tok + COALESCE(tok.out_tok, 0)) AS total_tokens
 FROM tok LEFT JOIN ua USING (trace)
+GROUP BY user_id
+ORDER BY total_tokens DESC;
+
+
+-- ---------------------------------------------------------------------
+-- 13-LA) 최근 90일 토큰 — 사용자별 Top N  [Log Analytics 콘솔용]
+-- ---------------------------------------------------------------------
+-- 13) 과 결과는 같지만 FROM 이 하나뿐이라 Log Analytics 콘솔에서도 실행됩니다.
+-- 콘솔은 FROM 에 로그 뷰가 정확히 1개여야 하며(두 번 참조해도 위반),
+-- 어기면 "FROM clause must contain exactly one log view" 오류가 납니다.
+-- 조인 대신 trace 단위 조건부 집계로 두 로그를 한 번의 스캔에서 합칩니다.
+--   ※ FROM 은 로그 뷰 4단 경로입니다. 버킷 위치/ID 는 프로젝트마다 다르니 확인하세요:
+--       gcloud logging buckets list --format='table(name,location,analyticsEnabled)'
+--   ※ trace 당 1행으로 접으므로 같은 trace 의 ModelArmorAudit 행에 의한
+--     토큰 부풀림(13) 의 ua CTE 가 막던 것)도 그대로 방지됩니다.
+WITH per_trace AS (
+  SELECT
+    trace,
+    MAX(IF(log_name LIKE '%gemini_enterprise_user_activity',
+           JSON_VALUE(json_payload,'$.userIamPrincipal'), NULL)) AS user_id,
+    COUNTIF(log_name LIKE '%gen_ai.client.inference.operation.details') AS llm_calls,
+    SUM(IF(log_name LIKE '%gen_ai.client.inference.operation.details',
+           SAFE_CAST(JSON_VALUE(json_payload,'$."gen_ai.usage.input_tokens"')  AS INT64), 0)) AS in_tok,
+    SUM(IF(log_name LIKE '%gen_ai.client.inference.operation.details',
+           SAFE_CAST(JSON_VALUE(json_payload,'$."gen_ai.usage.output_tokens"') AS INT64), 0)) AS out_tok
+  FROM `YOUR_PROJECT_ID.global._Default._AllLogs`
+  WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 90 DAY)
+    AND trace IS NOT NULL
+    AND (log_name LIKE '%gen_ai.client.inference.operation.details'
+      OR (log_name LIKE '%gemini_enterprise_user_activity'
+          AND JSON_VALUE(json_payload,'$.logMetadata.methodName') = 'StreamAssist'))
+  GROUP BY trace
+)
+SELECT
+  user_id,
+  COUNT(*)                  AS turns,
+  SUM(in_tok)               AS input_tokens,
+  SUM(out_tok)              AS output_tokens,
+  SUM(in_tok + out_tok)     AS total_tokens
+FROM per_trace
+WHERE llm_calls > 0          -- 토큰 행이 있는 trace 만 (13) 의 tok LEFT JOIN ua 와 동일)
 GROUP BY user_id
 ORDER BY total_tokens DESC;

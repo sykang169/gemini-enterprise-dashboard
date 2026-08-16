@@ -2,17 +2,26 @@
 -- Gemini Enterprise + Model Armor — Log Analytics 대시보드 쿼리 세트
 -- =====================================================================
 -- 대상 테이블 — 실행하는 창구에 따라 FROM 이름이 다릅니다(같은 데이터):
---   BigQuery 콘솔 / bq CLI (아래 쿼리들의 기본형, BQ 스캔 요금 있음)
---     `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs`        ← 링크된 데이터셋
---   Log Analytics 콘솔 (무료)
+--
+--   [기본] Log Analytics 콘솔 (무료) — 아래 쿼리들이 쓰는 이름
 --     `YOUR_PROJECT_ID.global._Default._AllLogs`             ← 로그 뷰 4단 경로
 --       형식: <프로젝트ID>.<버킷 위치>.<버킷ID>.<뷰ID>
---       (`gcloud logging buckets list` 의 LOCATION/BUCKET_ID)
---     ※ 링크된 데이터셋 이름을 여기 쓰면
---       "FROM clause must contain exactly one log view" 오류가 납니다.
---     ※ Log Analytics 는 FROM 에 로그 뷰 1개만 허용합니다 —
---       13) 처럼 뷰를 두 번 참조하는 CTE 조인은 이름만 바꿔도 같은 오류가 납니다.
---       BigQuery 쪽에서 실행하거나, 단일 스캔으로 다시 쓴 13-LA) 를 쓰세요.
+--       버킷 위치/ID 는 프로젝트마다 다르니 먼저 확인하세요:
+--         gcloud logging buckets list --format='table(name,location,analyticsEnabled)'
+--       analyticsEnabled 가 False 면 애초에 Log Analytics 조회가 안 됩니다.
+--
+--   BigQuery 콘솔 / bq CLI (스캔 요금 있음) — FROM 만 아래로 치환
+--     `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs`        ← 링크된 데이터셋
+--       sed -e 's|YOUR_PROJECT_ID.global._Default|YOUR_PROJECT_ID.gemini_ent_analytics|'
+--     BQ 로 가야 하는 경우: ①뷰를 두 번 참조하는 쿼리(13) ②버킷 리텐션(기본 90일)
+--     보다 오래된 구간 — 그건 아카이브 테이블 `t_logs_archive` / 뷰 `v_log_source` 에만
+--     있고 `_AllLogs` 로그 뷰에는 없습니다.
+--
+--   ※ Log Analytics 콘솔은 FROM 에 로그 뷰가 정확히 1개여야 합니다.
+--     링크된 데이터셋 이름을 쓰거나, 같은 뷰를 두 번 참조하면(13 의 CTE 조인)
+--     "FROM clause must contain exactly one log view" 오류가 납니다.
+--     1)~12) 는 참조가 1개라 그대로 실행되고, 13) 만 단일 스캔으로 다시 쓴
+--     13-LA) 를 쓰면 됩니다.
 --
 -- 사용법:
 --   Cloud Console → Logging → Log Analytics → 아래 쿼리 실행 →
@@ -40,7 +49,7 @@
 SELECT
   TIMESTAMP_TRUNC(timestamp, DAY) AS day,
   COUNT(*) AS queries
-FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs`
+FROM `YOUR_PROJECT_ID.global._Default._AllLogs`
 WHERE log_name LIKE '%gemini_enterprise_user_activity'
   AND JSON_VALUE(json_payload, '$.logMetadata.methodName') IN ('Search', 'StreamAssist')
 GROUP BY day
@@ -54,7 +63,7 @@ SELECT
   TIMESTAMP_TRUNC(timestamp, DAY) AS day,
   JSON_VALUE(json_payload, '$.logMetadata.methodName') AS method,
   COUNT(*) AS calls
-FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs`
+FROM `YOUR_PROJECT_ID.global._Default._AllLogs`
 WHERE log_name LIKE '%gemini_enterprise_user_activity'
   AND JSON_VALUE(json_payload, '$.logMetadata.methodName') IN ('Search', 'StreamAssist')
 GROUP BY day, method
@@ -67,7 +76,7 @@ ORDER BY day, method;
 SELECT
   TIMESTAMP_TRUNC(timestamp, DAY) AS day,
   COUNT(*) AS agent_calls
-FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs`
+FROM `YOUR_PROJECT_ID.global._Default._AllLogs`
 WHERE log_name LIKE '%gemini_enterprise_user_activity'
   AND JSON_VALUE(json_payload, '$.logMetadata.methodName') = 'StreamAssist'
 GROUP BY day
@@ -82,7 +91,7 @@ SELECT
   COUNTIF(JSON_VALUE(json_payload, '$.logMetadata.methodName') = 'StreamAssist') AS agent_calls,
   COUNTIF(JSON_VALUE(json_payload, '$.logMetadata.methodName') = 'Search')       AS searches,
   COUNT(*) AS total_queries
-FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs`
+FROM `YOUR_PROJECT_ID.global._Default._AllLogs`
 WHERE log_name LIKE '%gemini_enterprise_user_activity'
   AND JSON_VALUE(json_payload, '$.logMetadata.methodName') IN ('Search', 'StreamAssist')
 GROUP BY user_id
@@ -98,7 +107,7 @@ SELECT
   COUNT(DISTINCT JSON_VALUE(json_payload, '$.userIamPrincipal')) AS active_users,
   COUNT(*) AS queries,
   ROUND(SAFE_DIVIDE(COUNT(*), COUNT(DISTINCT JSON_VALUE(json_payload, '$.userIamPrincipal'))), 2) AS queries_per_user
-FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs`
+FROM `YOUR_PROJECT_ID.global._Default._AllLogs`
 WHERE log_name LIKE '%gemini_enterprise_user_activity'
   AND JSON_VALUE(json_payload, '$.logMetadata.methodName') IN ('Search', 'StreamAssist')
 GROUP BY day
@@ -115,7 +124,7 @@ SELECT
   ROUND(SAFE_DIVIDE(
     COUNTIF(severity IN ('ERROR', 'CRITICAL', 'ALERT', 'EMERGENCY')),
     COUNT(*)) * 100, 2) AS failure_pct
-FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs`
+FROM `YOUR_PROJECT_ID.global._Default._AllLogs`
 WHERE log_name LIKE '%gemini_enterprise_user_activity'
 GROUP BY day
 ORDER BY day;
@@ -128,7 +137,7 @@ SELECT
   TIMESTAMP_TRUNC(timestamp, DAY) AS day,
   COALESCE(JSON_VALUE(json_payload, '$.response.answer.state'), 'UNKNOWN') AS state,
   COUNT(*) AS n
-FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs`
+FROM `YOUR_PROJECT_ID.global._Default._AllLogs`
 WHERE log_name LIKE '%gemini_enterprise_user_activity'
   AND JSON_VALUE(json_payload, '$.logMetadata.methodName') = 'StreamAssist'
 GROUP BY day, state
@@ -147,7 +156,7 @@ SELECT
   ROUND(SAFE_DIVIDE(
     COUNTIF(JSON_VALUE(json_payload, '$.sanitizationResult.filterMatchState') = 'MATCH_FOUND'),
     COUNT(*)) * 100, 2) AS block_pct
-FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs`
+FROM `YOUR_PROJECT_ID.global._Default._AllLogs`
 WHERE log_name LIKE '%sanitize_operations'
 GROUP BY day, operation
 ORDER BY day, operation;
@@ -163,7 +172,7 @@ SELECT
   COUNTIF(JSON_VALUE(json_payload, '$.sanitizationResult.filterResults.rai.raiFilterResult.raiFilterTypeResults.hate_speech.matchState')      = 'MATCH_FOUND') AS hate_speech,
   COUNTIF(JSON_VALUE(json_payload, '$.sanitizationResult.filterResults.rai.raiFilterResult.raiFilterTypeResults.sexually_explicit.matchState') = 'MATCH_FOUND') AS sexually_explicit,
   COUNTIF(JSON_VALUE(json_payload, '$.sanitizationResult.filterResults.csam.csamFilterFilterResult.matchState')                                = 'MATCH_FOUND') AS csam
-FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs`
+FROM `YOUR_PROJECT_ID.global._Default._AllLogs`
 WHERE log_name LIKE '%sanitize_operations'
 GROUP BY day
 ORDER BY day;
@@ -176,7 +185,7 @@ SELECT
   FORMAT_TIMESTAMP('%A', timestamp) AS weekday,
   EXTRACT(HOUR FROM timestamp)      AS hour_of_day,
   COUNT(*) AS queries
-FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs`
+FROM `YOUR_PROJECT_ID.global._Default._AllLogs`
 WHERE log_name LIKE '%gemini_enterprise_user_activity'
   AND JSON_VALUE(json_payload, '$.logMetadata.methodName') IN ('Search', 'StreamAssist')
 GROUP BY weekday, hour_of_day
@@ -218,7 +227,7 @@ SELECT
       + COALESCE(SAFE_CAST(JSON_VALUE(json_payload,'$."gen_ai.usage.output_tokens"') AS INT64), 0)) AS total_tokens,
   MIN(timestamp) AS first_row,
   MAX(timestamp) AS last_row
-FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs`
+FROM `YOUR_PROJECT_ID.global._Default._AllLogs`
 WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 90 DAY)
   AND log_name LIKE '%gen_ai.client.inference.operation.details';
 
@@ -234,7 +243,7 @@ SELECT
   SUM(SAFE_CAST(JSON_VALUE(json_payload,'$."gen_ai.usage.output_tokens"')           AS INT64)) AS output_tokens,
   SUM(SAFE_CAST(JSON_VALUE(json_payload,'$."gen_ai.usage.input_tokens"')            AS INT64)
       + COALESCE(SAFE_CAST(JSON_VALUE(json_payload,'$."gen_ai.usage.output_tokens"') AS INT64), 0)) AS total_tokens
-FROM `YOUR_PROJECT_ID.gemini_ent_analytics._AllLogs`
+FROM `YOUR_PROJECT_ID.global._Default._AllLogs`
 WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 90 DAY)
   AND log_name LIKE '%gen_ai.client.inference.operation.details'
 GROUP BY day
@@ -248,7 +257,7 @@ ORDER BY day;
 -- 신원은 user_activity 쪽 userIamPrincipal 에만 있고, 두 로그는 `trace` 로 이어집니다.
 -- 전제조건: 엔진에 observabilityConfig.sensitiveLoggingEnabled = true
 --           (꺼져 있으면 토큰 수치는 맞되 user_id 가 전부 '<elided>' 한 명으로 뭉칩니다)
--- ※ 이 쿼리는 뷰를 두 번 참조하므로 BigQuery 전용입니다.
+-- ※ 이 쿼리만 뷰를 두 번 참조하므로 BigQuery 전용입니다(FROM 도 링크된 데이터셋).
 --   Log Analytics 콘솔에서는 아래 13-LA) 를 쓰세요.
 WITH tok AS (
   SELECT trace,

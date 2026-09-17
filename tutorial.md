@@ -156,6 +156,39 @@ Gemini Enterprise는 기본적으로 로그의 민감 필드를 `<elided>`로 �
 
 <walkthrough-footnote>중간에 IAM 전파 대기(약 5분) 단계에서 멈춘 것처럼 보여도 정상입니다. 기다려 주세요.</walkthrough-footnote>
 
+## 기존 로그 가져오기 (설치 전 데이터)
+
+**설치하기 전에 쌓인 로그도 대시보드에 나옵니다.** 단, 로그 버킷에 **아직 남아 있는 것**만입니다.
+
+- Log Analytics를 켜면 `_AllLogs`는 켜기 **전에** 들어온 로그까지 포함해 버킷에 남은 로그를 모두 보여줍니다. 실측: `2026-07-08`에 켠 프로젝트에서 켜기 19일 전인 `2026-06-19`(보관 90일의 시작일)부터 날짜 공백 없이 조회됐습니다(감사 로그로 활성화 시각 확인).
+- 차트는 `_AllLogs`가 아니라 아카이브(`t_logs_archive`)를 읽습니다. 앞 단계에서 `enable_log_archive=true`로 배포했다면 **첫 아카이브 실행이 아카이브가 비어 있음을 보고 버킷에 남은 기간 전체를 자동으로 복사**합니다. 따로 할 일은 없습니다.
+- 보관 기간이 지난 로그는 어떤 방법으로도 되살릴 수 없습니다. 원문 로깅을 켜기 전 질문은 `<elided>`로, Model Armor를 연결하기 전 기간은 비어 있는 상태로 들어옵니다.
+
+**1) 가져온 범위 확인** — 두 결과의 `oldest`가 비슷하면 끝입니다(아카이브는 대시보드가 읽는 로그만 담아 건수가 훨씬 적은 게 정상입니다).
+
+```bash
+PROJ=<walkthrough-project-id/>
+bq query --use_legacy_sql=false --project_id=$PROJ \
+  "SELECT 'bucket' src, MIN(timestamp) oldest, COUNT(*) n FROM \`$PROJ.gemini_ent_analytics._AllLogs\`
+   UNION ALL
+   SELECT 'archive', MIN(timestamp), COUNT(*) FROM \`$PROJ.gemini_ent_dashboard.t_logs_archive\`"
+```
+
+**2) (필요할 때만) 전체 기간 다시 가져오기** — 아카이브의 `oldest`가 버킷보다 한참 늦다면, 아카이브에 이미 행이 있던 상태에서 켜져 최근 것만 복사된 경우입니다(증분 실행은 아카이브의 최신 시각 기준 3시간 전부터만 읽습니다). 같은 `sql/03`을 **시작 시점만 1970년으로 바꿔** 한 번 돌리면 버킷에 남은 전체 기간을 채웁니다. 중복키 MERGE라 이미 있는 행은 다시 들어가지 않습니다.
+
+```bash
+PROJ=<walkthrough-project-id/>
+sed -e "s/YOUR_PROJECT_ID/$PROJ/g" \
+    -e 's/DECLARE lookback TIMESTAMP DEFAULT TIMESTAMP_SUB(watermark, INTERVAL 3 HOUR);/DECLARE lookback TIMESTAMP DEFAULT TIMESTAMP("1970-01-01");/' \
+    sql/03_archive_logs.sql > /tmp/backfill_archive.sql
+grep -q 'TIMESTAMP("1970-01-01");' /tmp/backfill_archive.sql && \
+  bq query --use_legacy_sql=false --project_id=$PROJ < /tmp/backfill_archive.sql
+```
+
+<walkthrough-footnote><b>비용:</b> 버킷 전체 기간의 모든 로그를 한 번 스캔합니다. 실측 90일치 최대 약 11GB(dry-run 상한, 온디맨드 기준 1달러 미만). <code>grep -q</code>는 sed 치환이 실제로 됐는지 확인하는 안전장치입니다 — 실패하면 평소처럼 3시간치만 돌기 때문입니다. 매시간 예약 실행과 겹쳐 <code>concurrent update</code> 오류가 나면 그냥 다시 실행하세요.</walkthrough-footnote>
+
+<walkthrough-footnote><b>아직 남은 로그를 더 오래 지키려면</b> 보관 기간을 늘리세요. 이미 지난 로그는 안 돌아오지만 지금 버킷에 있는 로그는 그만큼 더 남습니다(30일 초과분은 로그 보관비 발생): <code>gcloud logging buckets update _Default --location=global --retention-days=90</code></walkthrough-footnote>
+
 ## (선택) 콘텐츠 분류 활성화
 
 사용자 질문의 토픽/감성 분석까지 원하면, 아래처럼 옵션 플래그를 켜서 다시 적용하세요. (Gemini 호출 비용 발생)
@@ -171,6 +204,51 @@ terraform -chdir=terraform apply \
 ```
 
 이렇게 하면 매일 03:00(KST) 자동으로 신규 질문을 분류합니다.
+
+## (선택) 과거 질문 분류
+
+분류는 "아직 분류 안 된 질문"을 찾아 처리하므로(`t_content_topics`와 anti-join), **위 apply의 첫 실행이 버킷에 남아 있는 과거 질문까지 한꺼번에 분류합니다.** 대부분은 여기서 끝입니다.
+
+남는 경우는 하나입니다: **버킷 보관 기간은 지났지만 아카이브에는 남아 있는 질문**(예: 아카이브는 몇 달 전부터 켜 뒀는데 분류는 지금 켠 경우). 기본 분류 쿼리는 버킷(`_AllLogs`)만 읽어서 이 질문들을 못 봅니다. 아래처럼 **읽는 곳을 아카이브로 바꿔** 돌리면 됩니다.
+
+**1) 분류할 건수부터 확인** — Gemini 호출 1건 = 질문 1건이라, 이 숫자가 곧 비용입니다.
+
+```bash
+PROJ=<walkthrough-project-id/>
+bq query --use_legacy_sql=false --project_id=$PROJ "
+SELECT FORMAT_TIMESTAMP('%Y-%m', timestamp) month,
+  COUNTIF(q IS NOT NULL AND q != '<elided>') to_classify,
+  COUNTIF(q = '<elided>') masked
+FROM (
+  SELECT a.timestamp,
+    COALESCE(JSON_VALUE(json_payload, '\$.request.query'),
+      (SELECT STRING_AGG(JSON_VALUE(p, '\$.text'), '\n')
+         FROM UNNEST(JSON_QUERY_ARRAY(json_payload, '\$.request.query.parts')) p)) q
+  FROM \`$PROJ.gemini_ent_dashboard.t_logs_archive\` a
+  WHERE log_name LIKE '%gemini_enterprise_user_activity'
+    AND JSON_VALUE(json_payload, '\$.logMetadata.methodName') IN ('Search','StreamAssist')
+    AND NOT EXISTS (SELECT 1 FROM \`$PROJ.gemini_ent_dashboard.t_content_topics\` t
+                    WHERE t.timestamp = a.timestamp))
+GROUP BY month ORDER BY month"
+```
+
+`masked`는 원문 로깅을 켜기 전 질문이라 분류할 수 없습니다(소급 불가).
+
+**2) 기간을 정해 아카이브에서 분류** — 같은 `sql/02`에서 읽는 테이블과 기간만 바꿉니다. 건수가 많으면 한 번에 다 돌리지 말고 **월 단위로 나눠** 실행하세요(쿼리 한 건은 6시간 제한이 있고, 실측 평균 실행 시간이 이미 87분입니다).
+
+```bash
+PROJ=<walkthrough-project-id/>
+FROM_TS=2026-06-01   # 포함
+TO_TS=2026-07-01     # 제외
+sed -e "s/YOUR_PROJECT_ID/$PROJ/g" \
+    -e 's/gemini_ent_analytics\._AllLogs/gemini_ent_dashboard.t_logs_archive/' \
+    -e "s/WHERE log_name LIKE '%gemini_enterprise_user_activity'/WHERE timestamp >= TIMESTAMP('$FROM_TS') AND timestamp < TIMESTAMP('$TO_TS') AND log_name LIKE '%gemini_enterprise_user_activity'/" \
+    sql/02_content_classification.sql > /tmp/classify_history.sql
+grep -q "t_logs_archive" /tmp/classify_history.sql && grep -q "TIMESTAMP('$FROM_TS')" /tmp/classify_history.sql && \
+  bq query --use_legacy_sql=false --project_id=$PROJ < /tmp/classify_history.sql
+```
+
+<walkthrough-footnote><b>안전한 이유:</b> 이미 분류된 질문은 Gemini를 호출하기 전에 걸러지고(anti-join), 결과는 <code>timestamp</code> 기준 MERGE라 같은 기간을 다시 돌리거나 매일 예약 실행과 겹쳐도 중복 행이 생기지 않습니다. 두 <code>grep -q</code>는 치환이 실패해 <b>기간 제한 없이 전체를 분류하는 사고</b>를 막는 안전장치입니다. 분류 결과는 바로 <code>v_topic_distribution</code> · <code>v_intent_distribution</code> · <code>v_sentiment_daily</code>에 반영됩니다.</walkthrough-footnote>
 
 ## Looker Studio 대시보드 만들기
 
@@ -198,8 +276,8 @@ terraform -chdir=terraform output -raw looker_studio_url
 
 대시보드 인프라 배포가 끝났습니다.
 
-- 데이터는 배포 시점 이후부터 누적됩니다 (forward-only)
-- 뷰는 Log Analytics 연합 조회라 **항상 최신**입니다
+- 설치 전 로그도 **버킷에 남아 있던 기간만큼** 함께 보입니다. 보관 기간이 지난 로그는 복구할 수 없습니다
+- 차트는 아카이브를 읽어 **최대 1시간 늦게** 갱신됩니다(모든 지표가 일별 집계라 읽히는 값은 같습니다)
 - 질문·응답 원문 로깅을 껐다면 `v_user_questions`는 비어 있는 게 정상입니다. 지금이라도 켜면 **켠 시점 이후** 질문부터 쌓입니다: `./deploy.sh <walkthrough-project-id/> -var="enable_sensitive_logging=true"`
 - 정리하려면: `terraform -chdir=terraform destroy -var project_id=<walkthrough-project-id/>`
 

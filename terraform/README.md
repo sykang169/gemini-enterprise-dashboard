@@ -153,10 +153,15 @@ if you want a different fixed daily time, converting to UTC yourself.
   retention (was 30 days at initial authoring time, now 90 — always check
   `gcloud logging buckets describe _Default --location=global` for the live
   value before ever managing this bucket as a full resource).
-- **Forward-only indexing.** Log Analytics only indexes logs ingested *after*
-  it was enabled on the bucket. Re-running `terraform apply` does not
-  backfill history; there is no Terraform-manageable way around this — it's
-  an upstream Cloud Logging constraint.
+- **History is bounded by retention, not by the enablement date.** Logs that
+  were already in the bucket when Log Analytics was enabled DO show up in
+  `_AllLogs` (verified: enabled 2026-07-08 06:48 UTC per the `UpdateBucket`
+  audit log, yet `_AllLogs` returns rows from 2026-06-19 with no gap). What
+  cannot come back is anything that already aged out of retention. The first
+  `archive_logs` run copies the whole retention window when the archive is
+  empty; to re-copy it into a non-empty archive, or to classify questions that
+  now live only in the archive, see `tutorial.md` ("기존 로그 가져오기" /
+  "(선택) 과거 질문 분류").
 - **IAM propagation wait (~5 min) is real and required.** `model_and_views.tf`
   inserts `time_sleep.wait_for_iam_propagation` (300s) between granting
   `roles/aiplatform.user` on the connection's service account and running

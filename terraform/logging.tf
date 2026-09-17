@@ -76,11 +76,17 @@ resource "null_resource" "enable_log_analytics" {
 # Linked dataset: exposes the _Default bucket's logs as
 # gemini_ent_analytics._AllLogs in BigQuery.
 # ---------------------------------------------------------------------------
-# IMPORTANT (forward-only): Log Analytics only indexes logs ingested AFTER
-# analytics was enabled on the bucket. Historical logs from before
-# enablement are NOT backfilled into _AllLogs — they remain queryable only
-# via the classic Logs Explorer. Every view built on top of _AllLogs
-# therefore only reports data from the enablement date forward.
+# HISTORY IS BOUNDED BY RETENTION, NOT BY THE ENABLEMENT DATE. Logs already
+# in the bucket before analytics was enabled are visible in _AllLogs too.
+# Verified on the source project: enabled 2026-07-08 06:48 UTC (UpdateBucket
+# audit log), yet _AllLogs returns rows from 2026-06-19 with no gap around the
+# enablement date. What is lost for good is whatever had already aged out of
+# retention.
+#
+# The description string below still says "Forward-only". It is left as-is on
+# purpose: a Log Analytics link has no update API, so changing the description
+# would force Terraform to destroy and recreate the linked dataset, breaking
+# every view that reads _AllLogs mid-apply. Trust this comment, not that string.
 
 resource "google_logging_linked_dataset" "gemini_ent_analytics" {
   parent      = "projects/${var.project_id}"

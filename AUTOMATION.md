@@ -116,7 +116,7 @@ Colab에서 열거나 로컬 Jupyter에서 리포지토리 루트를 기준으�
 `sql/01_create_views.sql` 경로를 자동 탐색합니다). 셀은 위에서 아래로 순서대로 실행합니다:
 
 0. 변수 설정 (프로젝트/데이터셋/커넥션/모델 이름 + 인증)
-1. Log Analytics 활성화 + linked dataset 생성 (멱등, forward-only 경고 포함)
+1. Log Analytics 활성화 + linked dataset 생성 (멱등, 보관 기간 안내 포함)
 2. 대시보드 데이터셋 생성 (멱등)
 3. 뷰 생성 — `sql/01_create_views.sql` 실행 (멱등, `CREATE OR REPLACE VIEW`)
 4. 커넥션 + IAM + 원격 모델 (멱등)
@@ -147,10 +147,13 @@ API는 더 이상 수동으로 미리 활성화할 필요가 없습니다 — `t
 
 ## 중요한 주의사항
 
-1. **Forward-only (되돌릴 수 없음)**: Log Analytics는 활성화된 시점 이후의 로그만
-   `gemini_ent_analytics._AllLogs`에 인덱싱합니다. 과거 로그는 절대 백필되지 않으며, 이는
-   Terraform이나 노트북이 아니라 Cloud Logging 자체의 제약입니다. 이미 이 프로젝트에서는
-   2026-07-08 활성화 시점 이전 로그는 조회되지 않습니다.
+1. **설치 전 로그는 버킷 보관 기간만큼만 (만료분은 되돌릴 수 없음)**: Log Analytics는 활성화
+   **이전**에 버킷에 들어온 로그도 `gemini_ent_analytics._AllLogs`에 보여줍니다. 실측: 이
+   프로젝트는 2026-07-08 06:48 UTC에 활성화했는데(감사 로그 `UpdateBucket analyticsEnabled`로
+   확인) `_AllLogs`에 2026-06-19 로그부터 날짜 공백 없이 조회됩니다(예전 이 문서의 "활성화 이전
+   로그는 조회되지 않는다"는 설명은 실측과 달라 고쳤습니다). 한계는 보관 기간입니다 — 이미
+   만료된 로그는 Terraform·노트북·Cloud Logging 어느 쪽으로도 복구할 수 없습니다. 아카이브로
+   가져오기와 과거 질문 분류 절차는 `tutorial.md`의 "기존 로그 가져오기" / "(선택) 과거 질문 분류".
 2. **로그 보관 기간(retention) — 90일**: `_Default` 로그 버킷의 `retentionDays`는 현재 **90일**입니다
    (`gcloud logging buckets describe _Default --location=global`로 재확인 가능). `terraform/logging.tf`의
    `google_logging_project_bucket_config` 대안 예시 주석도 이 값(90)으로 맞춰뒀습니다 — 실제로 그

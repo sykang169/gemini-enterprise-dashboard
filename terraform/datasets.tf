@@ -17,7 +17,7 @@ resource "google_bigquery_dataset" "gemini_ent_dashboard" {
     layer = "presentation"
   }
 
-  # The upstream analytics dataset is forward-only and append-heavy; this
+  # The upstream analytics dataset is bounded by log retention and append-heavy; this
   # dataset only holds views + a small derived table, so accidental
   # `terraform destroy` risk is limited, but we still require an explicit
   # confirmation step outside Terraform before ever destroying it (see
